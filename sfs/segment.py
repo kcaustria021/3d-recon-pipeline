@@ -50,10 +50,12 @@ def get_mask(img):
 
     cv2.imshow("Image", img)
     cv2.setMouseCallback("Image", click_event, param={"points": points, "img": img})
+    cv2.waitKey(0)
 
     points = np.array(points, np.int32)
     polygon_pts = points.reshape((-1, 1, 2))
     cv2.fillPoly(mask, [polygon_pts], color=(255, 255, 255))
+    cv2.imshow("Mask", mask)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
