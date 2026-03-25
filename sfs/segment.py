@@ -108,23 +108,23 @@ def main():
 
     frames = get_frames(img_path)
     try:
-        backgrounds = get_backgrounds(bg_path)
-        for i in range(len(frames)):
-            print(f"Frame {i}...")
-            frame = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
-            mask = get_mask(frame, backgrounds, threshold=60)
-            color_mask = cv2.cvtColor(mask.astype(np.uint8), cv2.COLOR_GRAY2BGR)
-            color_mask[:, :, 2] = mask
-            cv2.imshow("mask", color_mask)
-            print("Press 'y' if you want to clean the mask")
-            k = cv2.waitKey(0) & 0xFF
-            if k == 121:
-                mask = clean_mask(color_mask, mask)
-            
-            write_path = os.path.join(output_path, f"mask{i:05d}.png")
-            cv2.imwrite(write_path, mask)
-        
-        cv2.destroyAllWindows()
+        # backgrounds = get_backgrounds(bg_path)
+        # for i in range(len(frames)):
+        #     print(f"Frame {i}...")
+        #     frame = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
+        #     mask = get_mask(frame, backgrounds, threshold=60)
+        #     color_mask = cv2.cvtColor(mask.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        #     color_mask[:, :, 2] = mask
+        #     cv2.imshow("mask", color_mask)
+        #     print("Press 'y' if you want to clean the mask")
+        #     k = cv2.waitKey(0) & 0xFF
+        #     if k == 121:
+        #         mask = clean_mask(color_mask, mask)
+        #     
+        #     write_path = os.path.join(output_path, f"mask{i:05d}.png")
+        #     cv2.imwrite(write_path, mask)
+        # 
+        # cv2.destroyAllWindows()
         view_masks(output_path)
     except FileNotFoundError as e:
         print(e)
