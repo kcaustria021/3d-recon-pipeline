@@ -1,28 +1,102 @@
+# general imports
 import numpy as np
 import cv2
 import glob
+import argparse
+import os
 
-from utils_sfs import compute_proj_matrix
+# class imports
 from utils_sfs import View
 from utils_sfs import Node
+
+# function imports
 from utils_sfs import carve_voxels
 from utils_sfs import compute_bounds
 from utils_sfs import cubify
 from utils_sfs import export_to_ply
 
+def get_args():
+    parser = argparse.ArgumentParser(
+            description="An argument parser"
+        )
+
+    parser.add_argument(
+            "imgs_path",
+            type=str,
+            help="The path of the images of the object"
+        )
+    parser.add_argument(
+            "masks_path",
+            type=str,
+            help="The path of the binary masks for the object"
+        )
+    parser.add_argument(
+            "output_file",
+            type=str,
+            help="The file to write the point clouds to"
+        )
+    parser.add_argument(
+            "projs_file",
+            type=str,
+            help="The .npz file that contains the projection matrices"
+        )
+    parser.add_argument(
+            "-s",
+            action="store_true",
+            help="Whether or not a single view is used"
+        )
+
+    args = parser.parse_args()
+    return args
+
 def main():
-    imgs = glob.glob("media/testing/objs/*.png")
-    masks = glob.glob("media/testing/masks/*.png")
+    args = get_args()
+    imgs_path = args.imgs_path
+    masks_path = args.masks_path
+    output_file = args.output_file
+    projs_file = args.projs_file
+    single_view = args.s
+
+    assert output_file.endswith(".ply"), "Output file must be a .ply file"
+
+    imgs = sorted(glob.glob(os.path.join(imgs_path, "*.png")))
+    masks = sorted(glob.glob(os.path.join(masks_path, "*.png")))
 
     assert len(imgs) == len(masks), "Number of images must match number of masks"
     n_views = len(imgs)
 
     # initialize views
+    projs = np.load(projs_file, allow_pickle=True)
+
     views = []
     for i in range(n_views):
-        print(f"Initialize View {i}")
-        dist, P = compute_proj_matrix(i)
-        view = View(imgs[i], masks[i], P, dist)
+        print(f"Initialize view {i}")
+
+        if single_view:
+            best_view = 3 # selected at random
+            proj_dict = projs[f"view{best_view:05d}"].item()
+            K = proj_dict.get("K")
+            R = proj_dict.get("R")
+            t = proj_dict.get("t")
+            dist = proj_dict.get("dist")
+
+            rt = np.hstack((R, t))
+            P = K @ rt
+            view = View(imgs[i], masks[i], P, dist)
+        else:
+            proj_dict = projs[f"view{i:05d}"].item()
+            K = proj_dict.get("K")
+            R = proj_dict.get("R")
+            t = proj_dict.get("t")
+            dist = proj_dict.get("dist")
+            try:
+                rt = np.hstack((R, t))
+            except:
+                t = np.expand_dims(t, 1)
+                rt = np.hstack((R, t))
+            P = K @ rt
+            view = View(imgs[i], masks[i], P, dist)
+
         views.append(view)
 
     min_bound, max_bound = compute_bounds(views)
@@ -35,7 +109,7 @@ def main():
     print("Carving voxels...")
     carve_voxels(octree_root, views)
 
-    export_to_ply(octree_root, "media/testing/recon.ply")
+    export_to_ply(octree_root, output_file)
 
 if __name__ == "__main__":
     main()

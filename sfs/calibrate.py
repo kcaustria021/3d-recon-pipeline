@@ -1,5 +1,3 @@
-# TODO: implement camera calibration
-# see https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
 import cv2
 import numpy as np
 import glob
@@ -24,6 +22,8 @@ def main():
     dist = np.zeros((5,))
     rvecs = np.zeros((n_views, 3, 1))
     tvecs = np.zeros((n_views, 3, 1))
+    data = {}
+
     for fname in images:
         img = np.array(cv2.imread(fname))
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -47,13 +47,22 @@ def main():
                 None,
                 None)
 
-    # save values
+    # evaluate
     print(f"Root mean square reprojection error: {retval:.4f}")
-    np.save("media/calibration/instrinsic_matrix.npy", mtx)
-    np.save("media/calibration/distortion_coeffs.npy", dist)
-    np.save("media/calibration/rot_vecs.npy", rvecs)
-    np.save("media/calibration/trans_vecs.npy", tvecs)
 
+    # save values
+    for i in range(len(rvecs)):
+        R, _ = cv2.Rodrigues(rvecs[i])
+        t = tvecs[i]
+
+        data[f"view{i:05d}"] = {
+                "K": mtx,
+                "dist": dist,
+                "R": R,
+                "t": t
+            }
+
+    np.savez("media/testing/test_real_data/projs", **data)
 
     cv2.destroyAllWindows()
 

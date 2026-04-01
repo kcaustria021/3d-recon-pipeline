@@ -10,15 +10,17 @@ class View:
     def __init__(self, img_path:str, mask_path:str, P:npt.NDArray, dist):
         self.img = np.array(cv2.imread(img_path))
         self.img = cv2.cvtColor(self.img, cv2.COLOR_BGR2GRAY)
+
         self.mask = np.array(cv2.imread(mask_path))
         self.mask = cv2.cvtColor(self.mask, cv2.COLOR_BGR2GRAY)
+
         self.mask[self.mask > 0] = 1
         self.mask = self.mask.astype(bool)
         self.proj_matrix = P
         self.dist = dist
 
-        self.dst_bg = get_distance_map(self.mask)
-        self.dst_fg = get_distance_map(~self.mask)
+        self.dst_bg = get_distance_map((self.mask).astype(np.uint8))
+        self.dst_fg = get_distance_map((~self.mask).astype(np.uint8))
 
     def get_proj(self):
         return self.proj_matrix
@@ -55,15 +57,15 @@ class Node:
         zm = (zmin + zmax) / 2
 
         boxes = [
-            (xmin, xm, ymin, ym, zmin, zm),
-            (xm, xmax, ymin, ym, zmin, zm),
-            (xmin, xm, ymin, ym, zm, zmax),
-            (xm, xmax, ymin, ym, zm, zmax),
-            (xmin, xm, ym, ymax, zmin, zm),
-            (xm, xmax, ym, ymax, zmin, zm),
-            (xmin, xm, ym, ymax, zm, zmax),
-            (xm, xmax, ym, ymax, zm, zmax)
-        ]
+                (xmin, xm, ymin, ym, zmin, zm),
+                (xm, xmax, ymin, ym, zmin, zm),
+                (xmin, xm, ymin, ym, zm, zmax),
+                (xm, xmax, ymin, ym, zm, zmax),
+                (xmin, xm, ym, ymax, zmin, zm),
+                (xm, xmax, ym, ymax, zmin, zm),
+                (xmin, xm, ym, ymax, zm, zmax),
+                (xm, xmax, ym, ymax, zm, zmax)
+                ]
 
         self.children = [Node(b, depth=self.depth+1, max_depth = self.max_depth) for b in boxes]
 
@@ -73,15 +75,24 @@ class Node:
         """
         xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
         return np.array([
-                [xmin, ymin, zmin],
-                [xmax, ymin, zmin],
-                [xmin, ymax, zmin],
-                [xmin, ymin, zmax],
-                [xmax, ymax, zmin],
-                [xmin, ymax, zmax],
-                [xmax, ymin, zmax],
-                [xmax, ymax, zmax]
-        ])
+            [xmin, ymin, zmin],
+            [xmax, ymin, zmin],
+            [xmin, ymax, zmin],
+            [xmin, ymin, zmax],
+            [xmax, ymax, zmin],
+            [xmin, ymax, zmax],
+            [xmax, ymin, zmax],
+            [xmax, ymax, zmax]
+            ])
+
+    def get_centre(self):
+        """
+        Get the coordinates of the centre of the cube
+        """
+        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
+        return np.array([
+            (xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2
+            ])
 
 def compute_bounds(views, z_min=0.1, z_max=10.0):
     points_3d = []
@@ -100,7 +111,7 @@ def compute_bounds(views, z_min=0.1, z_max=10.0):
         corners_2d = np.array([
             [x_min, y_min, 1], [x_max, y_min, 1],
             [x_min, y_max, 1], [x_max, y_max, 1]
-        ])
+            ])
 
         for c in corners_2d:
             p_near = P_inv @ (c * z_min)
@@ -132,54 +143,51 @@ def project_points(P, X):
     return unhomogenize(P @ homogenize(X).T)
 
 def get_distance_map(img):
-    h, w = img.shape
-    dst = img.copy()
-    for i in range(h):
-        for j in range(w-1, -1, -1):
-            if img[i, j] > 0:
-                if i == 0 or j == w-1:
-                    dst[i, j] = 1
-                else:
-                    dst[i, j] = 1 + min(dst[i-1, j], dst[i, j+1], dst[i-1, j+1])
+    # cv2.distanceTransform requires uint8 input
+    img_uint8 = img.astype(np.uint8)
+    dst = cv2.distanceTransform(img_uint8, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     return dst
 
 def classify_node(node, views):
     # print(f"Classifying node at depth {node.depth} with {len(node.children)} children...")
     all_inside = True
-    for view in views:
-        # get mask
-        mask = view.get_mask()
+    for view in views: 
+        mask = view.get_mask() 
+        P = view.get_proj()
+        corners = node.get_corners()
+        centre = node.get_centre()
+
         dst_bg = view.dst_bg
         dst_fg = view.dst_fg
+        h, w = dst_fg.shape
 
-        # get corners
-        corners = node.get_corners()
-        P = view.get_proj()
-        x = project_points(P, corners).T
-        if x is None:
+        corners_proj = project_points(P, corners).T # 8 x 2
+        centre_proj = project_points(P, centre.reshape(1, 3)).T # 1 x 2
+
+        if corners_proj is None:
             return "empty"
-        
-        x_min, x_max = int(np.min(x[0, :])), int(np.max(x[0, :]))
-        y_min, y_max = int(np.min(x[1, :])), int(np.max(x[1, :]))
-        h, w = mask.shape
-
-        # initial check for exclusion -- bounds
-        out_conds_bounds = [x_max < 0, y_max < 0, x_min >= w, y_min >= h]
-        if any(out_conds_bounds):
+        if centre_proj is None:
             return "empty"
-        
-        x_centre, y_centre = int((x_min + x_max) / 2), int((y_min + y_max) / 2)
-        # ensure centre is within img bounds
-        x_centre, y_centre = np.clip(x_centre, 0, w-1), np.clip(y_centre, 0, h-1)
-        
-        # compute Euclidean dist from centre to every pt in bbox
-        r = np.sqrt(((x_max - x_min)/2)**2 + ((y_max - y_min)/2)**2)
 
-        if dst_fg[y_centre, x_centre] > r:
+        u_centre, v_centre = centre_proj[0]
+        u_centre = int(np.round(u_centre))
+        v_centre = int(np.round(v_centre))
+
+        u_sq_diffs = np.square(corners_proj[:, 0] - u_centre)
+        v_sq_diffs = np.square(corners_proj[:, 1] - v_centre)
+        dsts = np.sqrt(u_sq_diffs + v_sq_diffs)
+
+        if u_centre < 0 or u_centre >= w or v_centre < 0 or v_centre >= h:
+            print("centre outside image")
+            return "empty"
+
+        r = float(np.max(dsts))
+
+        if dst_fg[v_centre, u_centre] > r:
             # complete outside
             return "empty"
-        
-        if dst_bg[y_centre, x_centre] <= r:
+
+        if dst_bg[v_centre, u_centre] <= r:
             # not completely inside for this view
             all_inside = False
 
@@ -189,7 +197,7 @@ def classify_node(node, views):
     else:
         # ambiguous
         return "unknown"
-    
+
 
 def carve_voxels(node, views):
     state = classify_node(node, views)
@@ -203,7 +211,7 @@ def carve_voxels(node, views):
         return
 
     if node.depth >= node.max_depth:
-        node.state = "full"
+        node.state = "empty"
         return
 
     node.subdivide()
@@ -259,20 +267,6 @@ def get_vid_frames(vid_path, output_path):
 
     return
 
-def compute_proj_matrix(camera_idx, decomp=False):
-    K = np.load("media/calibration/instrinsic_matrix.npy") # 3x3
-    dist = np.load("media/calibration/distortion_coeffs.npy") # 1x5
-    R = np.load("media/calibration/rot_vecs.npy") # n_views x 3 x 1
-    t = np.load("media/calibration/trans_vecs.npy") # n_views x 3 x 1
-
-    R, _ = cv2.Rodrigues(R[camera_idx])
-    rt = np.hstack((R, t[camera_idx]))
-    if not decomp:
-        return dist, np.dot(K, rt)
-    else:
-        return K, dist, R, t
-
-
 def export_to_ply(node, filename):
     points = []
     def collect_points(node):
@@ -299,7 +293,11 @@ end_header
 """
     with open(filename, "w") as f:
         f.write(header)
-        np.savetxt(f, points, fmt='%f %f %f')
+        try:
+            np.savetxt(f, points, fmt='%f %f %f')
+        except Exception as e:
+            print(f"points has length {len(points)}")
+            print(e)
     print(f"Saved {len(points)} voxels to {filename}")
 
 def test_dst_map():
@@ -307,27 +305,27 @@ def test_dst_map():
         [0, 1, 1],
         [1, 1, 0],
         [1, 1, 0]
-    ])
+        ])
 
     test_img2 = np.array([
         [1, 1, 1, 1],
         [0, 1, 1, 1],
         [0, 1, 1, 1],
         [0, 1, 1, 0]
-    ])
+        ])
 
     truth_img1 = np.array([
         [0, 1, 1],
         [1, 1, 0],
         [2, 1, 0]
-    ])
+        ])
 
     truth_img2 = np.array([
         [1, 1, 1, 1],
         [0, 2, 2, 1],
         [0, 3, 2, 1],
         [0, 2, 1, 0]
-    ])
+        ])
 
     res_img1 = get_distance_map(test_img1)
     res_img2 = get_distance_map(test_img2)
