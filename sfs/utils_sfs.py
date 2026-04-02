@@ -7,7 +7,7 @@ class View:
     """
     Class definition for a View
     """
-    def __init__(self, img_path:str, mask_path:str, P:npt.NDArray, dist):
+    def __init__(self, img_path:str, mask_path:str, proj_props:npt.NDArray):
         self.img = np.array(cv2.imread(img_path))
         self.img = cv2.cvtColor(self.img, cv2.COLOR_BGR2GRAY)
 
@@ -16,14 +16,27 @@ class View:
 
         self.mask[self.mask > 0] = 1
         self.mask = self.mask.astype(bool)
-        self.proj_matrix = P
-        self.dist = dist
+        self.proj_props = proj_props
 
         self.dst_bg = get_distance_map((self.mask).astype(np.uint8))
         self.dst_fg = get_distance_map((~self.mask).astype(np.uint8))
 
-    def get_proj(self):
-        return self.proj_matrix
+    def get_proj(self, decomp=False):
+        try:
+            self.K = self.proj_props.get("K")
+            self.R = self.proj_props.get("R")
+            self.t = np.expand_dims(self.proj_props.get("t"), axis=1)
+            self.dist = self.proj_props.get("dist")
+
+            rt = np.hstack((self.R, self.t))
+            self.P = self.K @ rt
+
+            if not decomp:
+                return self.P
+            else:
+                return self.K, self.R, self.t, self.dist
+        except Exception as e:
+            print(e)
 
     def get_img(self):
         return self.img
@@ -140,7 +153,8 @@ def project_points(P, X):
     """
     Projects a 3d point X to 2d point x using P
     """
-    return unhomogenize(P @ homogenize(X).T)
+    result = P @ homogenize(X).T
+    return unhomogenize(result)
 
 def get_distance_map(img):
     # cv2.distanceTransform requires uint8 input
@@ -178,7 +192,6 @@ def classify_node(node, views):
         dsts = np.sqrt(u_sq_diffs + v_sq_diffs)
 
         if u_centre < 0 or u_centre >= w or v_centre < 0 or v_centre >= h:
-            print("centre outside image")
             return "empty"
 
         r = float(np.max(dsts))
@@ -296,7 +309,6 @@ end_header
         try:
             np.savetxt(f, points, fmt='%f %f %f')
         except Exception as e:
-            print(f"points has length {len(points)}")
             print(e)
     print(f"Saved {len(points)} voxels to {filename}")
 

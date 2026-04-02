@@ -75,27 +75,10 @@ def main():
         if single_view:
             best_view = 3 # selected at random
             proj_dict = projs[f"view{best_view:05d}"].item()
-            K = proj_dict.get("K")
-            R = proj_dict.get("R")
-            t = proj_dict.get("t")
-            dist = proj_dict.get("dist")
-
-            rt = np.hstack((R, t))
-            P = K @ rt
-            view = View(imgs[i], masks[i], P, dist)
+            view = View(imgs[i], masks[i], proj_dict)
         else:
             proj_dict = projs[f"view{i:05d}"].item()
-            K = proj_dict.get("K")
-            R = proj_dict.get("R")
-            t = proj_dict.get("t")
-            dist = proj_dict.get("dist")
-            try:
-                rt = np.hstack((R, t))
-            except:
-                t = np.expand_dims(t, 1)
-                rt = np.hstack((R, t))
-            P = K @ rt
-            view = View(imgs[i], masks[i], P, dist)
+            view = View(imgs[i], masks[i], proj_dict)
 
         views.append(view)
 
