@@ -14,6 +14,9 @@ from utils_sfs import carve_voxels
 from utils_sfs import compute_bounds
 from utils_sfs import cubify
 from utils_sfs import export_to_ply
+from utils_sfs import get_fundamental_matrices
+from utils_sfs import extract_contours
+from utils_sfs import reconstruct
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -45,6 +48,11 @@ def get_args():
             action="store_true",
             help="Whether or not a single view is used"
         )
+    parser.add_argument(
+            "method",
+            type=str,
+            help="The method for SfS"
+        )
 
     args = parser.parse_args()
     return args
@@ -56,8 +64,9 @@ def main():
     output_file = args.output_file
     projs_file = args.projs_file
     single_view = args.s
+    sfs_method = args.method
 
-    assert output_file.endswith(".ply"), "Output file must be a .ply file"
+    # assert output_file.endswith(".ply"), "Output file must be a .ply file"
 
     imgs = sorted(glob.glob(os.path.join(imgs_path, "*.png")))
     masks = sorted(glob.glob(os.path.join(masks_path, "*.png")))
@@ -88,11 +97,22 @@ def main():
     x_max, y_max, z_max = cube_max
 
     # initialize octree
-    octree_root = Node(bounds=(x_min, x_max, y_min, y_max, z_min, z_max), max_depth=6)
-    print("Carving voxels...")
-    carve_voxels(octree_root, views)
+    if sfs_method == "volumetric":
+        # vanilla sfs
+        octree_root = Node(bounds=(x_min, x_max, y_min, y_max, z_min, z_max), max_depth=6)
+        print("Carving voxels...")
+        carve_voxels(octree_root, views)
 
-    export_to_ply(octree_root, output_file)
+        export_to_ply(octree_root, output_file)
+    elif sfs_method == "halfspace":
+        # halfspace
+        masks = [view.get_mask() for mask in masks]
+        Ps = [view.get_proj() for view in views]
+        Fs = get_fundamental_matrices(views)
+        contours = [extract_contours(view.get_mask()) for view in views]
+        
+        surface_pts = reconstruct(Ps, masks, contours, Fs)
+        np.save(output_file, surface_pts)
 
 if __name__ == "__main__":
     main()
