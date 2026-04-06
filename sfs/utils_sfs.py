@@ -3,6 +3,9 @@ from numpy import typing as npt
 import cv2
 import os
 
+"""
+CLASSES
+"""
 class View:
     """
     Class definition for a View
@@ -107,6 +110,69 @@ class Node:
             (xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2
             ])
 
+"""
+GENERAL
+"""
+
+def homogenize(arr):
+    """
+    Converts Euclidean coordinates to homogeneous coordinates
+
+    Args:
+        arr (NDArray, ((1,) or (n, m)): vector or array of m-vectors
+            to homogenize
+    Returns:
+        NDArray ((1,) or (n, m)): homogenized vector or array of 
+            m-vectors
+    """
+    if not isinstance(arr, np.ndarray):
+        arr = np.array(arr)
+    if len(arr.shape) < 2:
+        # one vector
+        return np.append(arr, 1)
+    else:
+        ones = np.ones((arr.shape[0],))
+        return np.hstack((arr, ones[:, np.newaxis]))
+
+def unhomogenize(vec: npt.NDArray):
+    """
+    Unhomogenizes a vector
+    """
+    n = vec.shape[0] - 1
+    return vec[:n] / vec[n]
+
+def get_vid_frames(vid_path, output_path):
+    cap = cv2.VideoCapture(vid_path)
+    frame_ctr = 0
+    if not os.path.exists(output_path):
+        os.mkdir(output_path)
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            print("Read failed")
+            break
+
+        cv2.imwrite(
+                os.path.join(output_path, f"frame{frame_ctr:05d}.png"),
+                frame)
+
+        frame_ctr += 1
+
+    return
+
+def project_points(P, X):
+    """
+    Projects a 3d point X to 2d point x using P
+    """
+    result = P @ homogenize(X).T
+    return unhomogenize(result)
+
+"""
+VANILLA SFS
+"""
+
 def compute_bounds(views, z_min=0.1, z_max=10.0):
     points_3d = []
     for view in views:
@@ -148,13 +214,6 @@ def cubify(min_bound, max_bound):
     new_max = ctr + half_side
 
     return new_min, new_max
-
-def project_points(P, X):
-    """
-    Projects a 3d point X to 2d point x using P
-    """
-    result = P @ homogenize(X).T
-    return unhomogenize(result)
 
 def get_distance_map(img):
     # cv2.distanceTransform requires uint8 input
@@ -211,7 +270,6 @@ def classify_node(node, views):
         # ambiguous
         return "unknown"
 
-
 def carve_voxels(node, views):
     state = classify_node(node, views)
 
@@ -232,53 +290,15 @@ def carve_voxels(node, views):
     for child in node.children:
         carve_voxels(child, views)
 
-def homogenize(arr):
-    """
-    Converts Euclidean coordinates to homogeneous coordinates
+"""
+HALF-SPACE SFS
+"""
 
-    Args:
-        arr (NDArray, ((1,) or (n, m)): vector or array of m-vectors
-            to homogenize
-    Returns:
-        NDArray ((1,) or (n, m)): homogenized vector or array of 
-            m-vectors
-    """
-    if not isinstance(arr, np.ndarray):
-        arr = np.array(arr)
-    if len(arr.shape) < 2:
-        # one vector
-        return np.append(arr, 1)
-    else:
-        ones = np.ones((arr.shape[0],))
-        return np.hstack((arr, ones[:, np.newaxis]))
 
-def unhomogenize(vec: npt.NDArray):
-    """
-    Unhomogenizes a vector
-    """
-    n = vec.shape[0] - 1
-    return vec[:n] / vec[n]
 
-def get_vid_frames(vid_path, output_path):
-    cap = cv2.VideoCapture(vid_path)
-    frame_ctr = 0
-    if not os.path.exists(output_path):
-        os.mkdir(output_path)
-
-    while True:
-        ret, frame = cap.read()
-
-        if not ret:
-            print("Read failed")
-            break
-
-        cv2.imwrite(
-                os.path.join(output_path, f"frame{frame_ctr:05d}.png"),
-                frame)
-
-        frame_ctr += 1
-
-    return
+"""
+I/O
+"""
 
 def export_to_ply(node, filename):
     points = []
@@ -311,41 +331,3 @@ end_header
         except Exception as e:
             print(e)
     print(f"Saved {len(points)} voxels to {filename}")
-
-def test_dst_map():
-    test_img1 = np.array([
-        [0, 1, 1],
-        [1, 1, 0],
-        [1, 1, 0]
-        ])
-
-    test_img2 = np.array([
-        [1, 1, 1, 1],
-        [0, 1, 1, 1],
-        [0, 1, 1, 1],
-        [0, 1, 1, 0]
-        ])
-
-    truth_img1 = np.array([
-        [0, 1, 1],
-        [1, 1, 0],
-        [2, 1, 0]
-        ])
-
-    truth_img2 = np.array([
-        [1, 1, 1, 1],
-        [0, 2, 2, 1],
-        [0, 3, 2, 1],
-        [0, 2, 1, 0]
-        ])
-
-    res_img1 = get_distance_map(test_img1)
-    res_img2 = get_distance_map(test_img2)
-
-    print("Image 1:")
-    print(res_img1)
-    print(truth_img1)
-
-    print("Image 2:")
-    print(res_img2)
-    print(truth_img2)
