@@ -30,7 +30,7 @@ class View:
         try:
             self.K = self.proj_props.get("K")
             self.R = self.proj_props.get("R")
-            self.t = np.expand_dims(self.proj_props.get("t"), axis=1)
+            self.t = self.proj_props.get("t").reshape(3, 1)
             self.dist = self.proj_props.get("dist")
 
             rt = np.hstack((self.R, self.t))
@@ -183,7 +183,7 @@ def project_points(P, X):
     Projects a 3d point X to 2d point x using P
     """
     result = P @ homogenize(X).T
-    return unhomogenize(result)
+    return unhomogenize(result.T)
 
 def get_fundamental_matrices(views):
     Fs = dict()
@@ -263,15 +263,15 @@ def classify_node(node, views):
         dst_fg = view.dst_fg
         h, w = dst_fg.shape
 
-        corners_proj = project_points(P, corners).T  # 8 x 2
-        centre_proj = project_points(P, centre.reshape(1, 3)).T  # 1 x 2
+        corners_proj = project_points(P, corners)  # 8 x 2
+        centre_proj = project_points(P, centre.reshape(1, 3)).T  # 2 x 1
 
         if corners_proj is None or centre_proj is None:
             return "empty"
 
-        u_centre, v_centre = centre_proj[0]
-        u_centre_i = int(np.round(u_centre))
-        v_centre_i = int(np.round(v_centre))
+        u_centre, v_centre = centre_proj
+        u_centre_i = int(np.round(u_centre[0]))
+        v_centre_i = int(np.round(v_centre[0]))
 
         u_sq_diffs = np.square(corners_proj[:, 0] - u_centre)
         v_sq_diffs = np.square(corners_proj[:, 1] - v_centre)
@@ -335,34 +335,34 @@ def carve_voxels(node, views):
 HALF-SPACE SFS
 """
 
-def get_point_status(X, views, eps=2.0):
+
+def get_point_status(Xs, views, eps=2.0):
     """
     Determine whether a point is null, pending, or full
     """
+    n_pts = Xs.shape[0]
+    status = np.full(n_pts, 2, dtype=int)
+
     for view in views:
         P = view.get_proj()
-        mask = view.get_mask()
         dst_map = view.dst_bg
+        h, w = dst_map.shape
 
-        X_proj = project_points(P, X)
-        us, vs = unhomogenize(X_proj).astype(np.int32)
+        X_proj = project_points(P, Xs)
+        u = X_proj[:, 0]
+        v = X_proj[:, 1]
 
-        h, w = mask.shape[:2]
-        if not (0 <= X_proj[0] and X_proj[0] < w and 0 <= X_proj[1] and X_proj[1] < h):
-            return "NULL"
+        in_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h)
 
-        dist = dst_map[int(X_proj[1]), int(X_proj[0])]
+        dsts = np.full(n_pts, -999.0)
+        dsts[in_bounds] = dst_map[v[in_bounds].astype(np.int32), u[in_bounds].astype(np.int32)]
+        status[dsts < -eps] = 0
+        pending_mask = (status != 0) & (np.abs(dsts) <= eps)
+        status[pending_mask] = 1
 
-        if dist < -eps:
-            # fully outside for one view
-            return "NULL"
-        elif np.abs(dist) <= eps:
-            # near the edge for at least one view
-            pending = True
+    return status
 
-    return "PENDING" if pending else "FULL"
-
-def interpolate(X, direction, views, n_iters=5):
+def interpolate(X, direction, views, status, n_iters=5):
     low = 0.0
     high = 1.0
     X_ref = X
@@ -371,8 +371,7 @@ def interpolate(X, direction, views, n_iters=5):
         mid = (low + high) / 2
         X_test = X + direction * mid
         
-        status = get_point_status(X_test, views)
-        if status == "NULL":
+        if status == 0:
             high = mid
         else:
             low = mid
@@ -395,23 +394,36 @@ def get_epipolar_line(F, pt):
     x = homogenize(pt).reshape((-1, 1))
     return F @ x
 
-def find_epipolar_match(line, contour):
+def find_epipolar_match(F, contour_i, contour_k):
     """
-    Find the point in another image corresponding to the
-    epipolar constraint
+    For each point in contour_i, find the closest point in contour_k
+    under the epipolar constraint defined by F.
+    Returns matched points and their distances, both shape (N,).
     """
-    a, b, c = line
-    dists = np.abs(a * contour[:, 0] + b * contour[:, 1] + c) / np.sqrt(a**2 + b**2)
-    min_idx = np.argmin(dists)
-    return contour[min_idx]
+    pts_i = homogenize(contour_i)           
+    lines = (F @ pts_i.T).T                 
+
+    a = lines[:, 0:1]                       
+    b = lines[:, 1:2]                       
+    c = lines[:, 2:3]                       
+
+    numerator = np.abs(
+        a * contour_k[:, 0].T +             
+        b * contour_k[:, 1].T +             
+        c                                   
+    )
+    denominator = np.sqrt(a**2 + b**2)      
+
+    all_dists = numerator / denominator     
+    best_idx = np.argmin(all_dists, axis=1) 
+
+    return contour_k[best_idx], np.min(all_dists, axis=1)
 
 def symmetric_match(F_ij, F_ji, pt_i, contour_j, contour_i):
-    """
-    Determine whether a match x_i -> x_k also has match x_k -> x_i
-    within some error bound
-    """
-    pt_j = find_epipolar_match(get_epipolar_line(F_ij, pt_i), contour_j)
-    pt_i_back = find_epipolar_match(get_epipolar_line(F_ji, pt_j), contour_i)
+    pts_j, _ = find_epipolar_match(F_ij, pt_i[np.newaxis], contour_j)
+    pt_j = pts_j[0]
+    pts_i_back, _ = find_epipolar_match(F_ji, pt_j[np.newaxis], contour_i)
+    pt_i_back = pts_i_back[0]
     return pt_j if np.linalg.norm(pt_i - pt_i_back) < 2.0 else None
 
 def backproject_ray(P, point):
@@ -446,49 +458,70 @@ def inside_silhouette(pt, mask):
     return mask[y, x] > 0
 
 def reconstruct(views, Fs):
-    """
-    Perform the reconstruction
-    """
     surface_points = []
     for i, view_i in enumerate(views):
-        # get view information
         P_i = view_i.get_proj()
         contour_i = view_i.contours
-        for pt_i in contour_i:
-            valid_points = []
+
+        view_matches = []
+        for k, view_k in enumerate(views):
+            if k == i:
+                continue
+            contour_k = view_k.contours
+
+            matched_k, _ = find_epipolar_match(Fs[i][k], contour_i, contour_k)
+
+            symmetric_matches = []
+            for j, pt_i in enumerate(contour_i):
+                pt_j = matched_k[j]
+                pts_i_back, _ = find_epipolar_match(Fs[k][i], pt_j[np.newaxis], contour_i)
+                pt_i_back = pts_i_back[0]
+
+                if np.linalg.norm(pt_i - pt_i_back) < 2.0:
+                    symmetric_matches.append(pt_j)
+                else:
+                    # failed symmetry check
+                    symmetric_matches.append(None)
+
+            view_matches.append(symmetric_matches)
+
+        valid_pts = []
+        for j, pt_j in enumerate(contour_i):
+            curr_pt_valid_pts = []
+            match_idx = 0
             for k, view_k in enumerate(views):
-                P_k = view_k.get_proj()
-                contour_k = view_k.contours
                 if k == i:
                     continue
-                pt_k = symmetric_match(
-                    Fs[i][k],
-                    Fs[k][i],
-                    pt_i,
-                    contour_k,
-                    contour_i
-                )
-                if pt_k is not None:
-                    # guess a 3d point
-                    X = triangulate(P_i, P_k, pt_i, pt_k)
-                    status = get_point_status(X, views)
-                    valid_points.append(X)
-                    
-                    if status == "FULL":
-                        valid_points.append(X)
-                    elif status == "PENDING":
-                        # compute camera centre
-                        M_i = P_i[:, :3]
-                        t_i = P_i[:, 3]
-                        cam_centre = -np.linalg.inv(M_i) @ t_i
-                        direction = cam_centre - X
-                        X_ref = interpolate(X, direction * 0.05, views)
-                        valid_points.append(X_ref)
-            if valid_points:
-                surface_points.append(np.mean(valid_points, axis=0))
+                pt_k = view_matches[match_idx][j]
+                if pt_k is None:            
+                    # skip failed symmetric matches
+                    match_idx += 1
+                    continue
+                P_k = view_k.get_proj()
+                X = triangulate(P_i, P_k, pt_j, pt_k)
+                curr_pt_valid_pts.append(X)
+                match_idx += 1
+
+            if len(curr_pt_valid_pts) == 0:
+                # no valid matches for this point
+                continue
+            valid_pts.append(np.mean(curr_pt_valid_pts, axis=0))
+
+        valid_pts = np.array(valid_pts)
+        statuses = get_point_status(valid_pts, views)
+
+        _, _, Vt = np.linalg.svd(P_i)
+        cam_centre = Vt[-1, :3] / Vt[-1, 3]
+
+        for j, status in enumerate(statuses):
+            X = valid_pts[j]
+            if status == 2:
+                surface_points.append(X)
+            elif status == 1:
+                X_ref = interpolate(X, (cam_centre - X) * 0.05, status, views)
+                surface_points.append(X_ref)
 
     return np.array(surface_points)
-
 
 """
 I/O

@@ -109,6 +109,7 @@ def main():
         Fs = get_fundamental_matrices(views)
         print("Recovering surface points...")
         surface_pts = reconstruct(views, Fs)
+        print(surface_pts[0])
         
         np.save(output_file, surface_pts)
         print(f"Saved {surface_pts.shape[0]} points to {output_file}")
