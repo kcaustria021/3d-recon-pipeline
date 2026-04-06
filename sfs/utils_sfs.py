@@ -2,7 +2,6 @@ import numpy as np
 from numpy import typing as npt
 import cv2
 import os
-from scipy.interpolate import interp1d
 
 """
 CLASSES
@@ -20,12 +19,14 @@ class View:
 
         self.mask[self.mask > 0] = 1
         self.mask = self.mask.astype(bool)
-        self.proj_props = proj_props
+
+        self.contours = extract_contours(self.mask)
 
         self.dst_bg = get_distance_map((self.mask).astype(np.uint8))
         self.dst_fg = get_distance_map((~self.mask).astype(np.uint8))
 
         # compute projection matrix
+        self.proj_props = proj_props
         try:
             self.K = self.proj_props.get("K")
             self.R = self.proj_props.get("R")
@@ -149,8 +150,12 @@ def unhomogenize(vec: npt.NDArray):
     """
     Unhomogenizes a vector
     """
-    n = vec.shape[0] - 1
-    return vec[:n] / vec[n]
+    if len(vec.shape) == 1:
+        n = vec.shape[0] - 1
+        return vec[:n] / vec[n]
+    elif len(vec.shape) == 2:
+        n = vec.shape[1] - 1
+        return vec[:, :n] / np.expand_dims(vec[:, n], axis=1)
 
 def get_vid_frames(vid_path, output_path):
     cap = cv2.VideoCapture(vid_path)
@@ -243,9 +248,8 @@ def cubify(min_bound, max_bound):
     return new_min, new_max
 
 def get_distance_map(img):
-    # cv2.distanceTransform requires uint8 input
-    img_uint8 = img.astype(np.uint8)
-    dst = cv2.distanceTransform(img_uint8, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    img= img.astype(np.uint8)
+    dst = cv2.distanceTransform(img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     return dst
 
 def classify_node(node, views):
@@ -269,28 +273,20 @@ def classify_node(node, views):
         u_centre_i = int(np.round(u_centre))
         v_centre_i = int(np.round(v_centre))
 
-        # Compute bounding radius from corners to centre in projection
         u_sq_diffs = np.square(corners_proj[:, 0] - u_centre)
         v_sq_diffs = np.square(corners_proj[:, 1] - v_centre)
         r = float(np.max(np.sqrt(u_sq_diffs + v_sq_diffs)))
 
-        # --- FIX 1: Don't reject just because centre is outside image ---
-        # Instead, clamp the centre to image bounds for distance lookups,
-        # or use corner projections directly.
         centre_in_image = (
             0 <= u_centre_i < w and 0 <= v_centre_i < h
         )
 
         if centre_in_image:
-            # Standard check: is the node completely outside the foreground?
             if dst_fg[v_centre_i, u_centre_i] > r:
                 return "empty"
-            # Is the node completely inside for this view?
             if dst_bg[v_centre_i, u_centre_i] <= r:
-                all_inside = False  # boundary node — not fully inside
+                all_inside = False
         else:
-            # --- FIX 2: Centre outside image; check corners individually ---
-            # If ALL corners project outside the image, node is empty
             u_corners = corners_proj[:, 0]
             v_corners = corners_proj[:, 1]
             any_corner_in_image = np.any(
@@ -300,17 +296,14 @@ def classify_node(node, views):
             if not any_corner_in_image:
                 return "empty"
 
-            # Check each corner that lands in-image against distance transforms
             corner_statuses = []
             for u_c, v_c in zip(u_corners, v_corners):
                 u_ci, v_ci = int(np.round(u_c)), int(np.round(v_c))
                 if 0 <= u_ci < w and 0 <= v_ci < h:
-                    # Is this corner inside the silhouette?
                     corner_statuses.append(mask[v_ci, u_ci] > 0)
 
             if len(corner_statuses) == 0 or not any(corner_statuses):
                 return "empty"
-            # Mixed or partially inside → treat as unknown boundary
             all_inside = False
 
     if all_inside:
@@ -341,6 +334,51 @@ def carve_voxels(node, views):
 """
 HALF-SPACE SFS
 """
+
+def get_point_status(X, views, eps=2.0):
+    """
+    Determine whether a point is null, pending, or full
+    """
+    for view in views:
+        P = view.get_proj()
+        mask = view.get_mask()
+        dst_map = view.dst_bg
+
+        X_proj = project_points(P, X)
+        us, vs = unhomogenize(X_proj).astype(np.int32)
+
+        h, w = mask.shape[:2]
+        if not (0 <= X_proj[0] and X_proj[0] < w and 0 <= X_proj[1] and X_proj[1] < h):
+            return "NULL"
+
+        dist = dst_map[int(X_proj[1]), int(X_proj[0])]
+
+        if dist < -eps:
+            # fully outside for one view
+            return "NULL"
+        elif np.abs(dist) <= eps:
+            # near the edge for at least one view
+            pending = True
+
+    return "PENDING" if pending else "FULL"
+
+def interpolate(X, direction, views, n_iters=5):
+    low = 0.0
+    high = 1.0
+    X_ref = X
+
+    for _ in range(n_iters):
+        mid = (low + high) / 2
+        X_test = X + direction * mid
+        
+        status = get_point_status(X_test, views)
+        if status == "NULL":
+            high = mid
+        else:
+            low = mid
+            X_ref = X_test
+
+    return X_ref
 
 def extract_contours(mask):
     """
@@ -407,45 +445,50 @@ def inside_silhouette(pt, mask):
         return False
     return mask[y, x] > 0
 
-def reconstruct(P_list, silhouettes, contours, F_matrices):
+def reconstruct(views, Fs):
     """
     Perform the reconstruction
     """
     surface_points = []
-    for i, contour_i in enumerate(contours):
+    for i, view_i in enumerate(views):
+        # get view information
+        P_i = view_i.get_proj()
+        contour_i = view_i.contours
         for pt_i in contour_i:
             valid_points = []
-            for k in range(len(contours)):
+            for k, view_k in enumerate(views):
+                P_k = view_k.get_proj()
+                contour_k = view_k.contours
                 if k == i:
                     continue
                 pt_k = symmetric_match(
-                    F_matrices[i][k],
-                    F_matrices[k][i],
+                    Fs[i][k],
+                    Fs[k][i],
                     pt_i,
-                    contours[k],
+                    contour_k,
                     contour_i
                 )
                 if pt_k is not None:
                     # guess a 3d point
-                    X = triangulate(P_list[i], P_list[k], pt_i, pt_k)
+                    X = triangulate(P_i, P_k, pt_i, pt_k)
+                    status = get_point_status(X, views)
                     valid_points.append(X)
-
-            if len(valid_points) >= 2:
-                X_avg = np.mean(valid_points, axis=0)
-                good_pt = True
-                for cam, mask in zip(P_list, silhouettes):
-                    proj = project_points(cam, X_avg)
-                    if not inside_silhouette(proj, mask):
-                        good_pt = False
-                        break
-                if good_pt:
-                    surface_points.append(X_avg)
+                    
+                    if status == "FULL":
+                        valid_points.append(X)
+                    elif status == "PENDING":
+                        # compute camera centre
+                        M_i = P_i[:, :3]
+                        t_i = P_i[:, 3]
+                        cam_centre = -np.linalg.inv(M_i) @ t_i
+                        direction = cam_centre - X
+                        X_ref = interpolate(X, direction * 0.05, views)
+                        valid_points.append(X_ref)
+            if valid_points:
+                surface_points.append(np.mean(valid_points, axis=0))
 
     return np.array(surface_points)
 
-def interpolate_points(points):
-    known = np.array([p for p in points if p is not None])
-    return known
 
 """
 I/O
@@ -482,3 +525,20 @@ end_header
         except Exception as e:
             print(e)
     print(f"Saved {len(points)} voxels to {filename}")
+
+def test_unhomogenize():
+    arr1 = np.array([-3, -2, -1, 1])
+    arr2 = np.array([-3, 2, 1])
+    arr3 = np.array([
+        [-3, -2, -1, 1],
+        [-4, 5, 6, 1]
+    ])
+
+    print("arr1: ", arr1)
+    print("arr1 unhomo: ", unhomogenize(arr1))
+
+    print("arr2: ", arr2)
+    print("arr2 unhomo: ", unhomogenize(arr2))
+
+    print("arr3: ", arr3)
+    print("arr3 unhomo: ", unhomogenize(arr3))

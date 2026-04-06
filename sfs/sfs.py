@@ -106,13 +106,12 @@ def main():
         export_to_ply(octree_root, output_file)
     elif sfs_method == "halfspace":
         # halfspace
-        masks = [view.get_mask() for mask in masks]
-        Ps = [view.get_proj() for view in views]
         Fs = get_fundamental_matrices(views)
-        contours = [extract_contours(view.get_mask()) for view in views]
+        print("Recovering surface points...")
+        surface_pts = reconstruct(views, Fs)
         
-        surface_pts = reconstruct(Ps, masks, contours, Fs)
         np.save(output_file, surface_pts)
+        print(f"Saved {surface_pts.shape[0]} points to {output_file}")
 
 if __name__ == "__main__":
     main()
