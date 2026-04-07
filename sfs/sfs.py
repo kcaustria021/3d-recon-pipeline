@@ -106,7 +106,7 @@ def main():
         export_to_ply(octree_root, output_file)
     elif sfs_method == "halfspace":
         # halfspace
-        masks = [view.get_mask() for mask in masks]
+        masks = [view.get_mask() for _ in masks]
         Ps = [view.get_proj() for view in views]
         Fs = get_fundamental_matrices(views)
         contours = [extract_contours(view.get_mask()) for view in views]
