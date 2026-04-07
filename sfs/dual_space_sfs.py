@@ -273,26 +273,26 @@ def reconstruct2(views, Fs, window_s=2):
                 if pt_prev is None or pt_next is None or idx_prev is None or idx_next is None:
                     continue
 
-                # ray & planes for current view
+                # ray & plane triple, to avoid camera centre singularity with SVD
                 ray_curr = get_visual_ray(P_curr, contour_curr[j], cam_centre_curr)
+                ray_prev = get_visual_ray(P_prev, contour_prev[idx_prev], cam_centre_prev)
+                ray_next = get_visual_ray(P_next, contour_next[idx_next], cam_centre_next)
+                
                 planes_curr = backproject_tangent_plane_analytic(
                     P_curr, view_curr.splines_tck, view_curr.splines_u, contour_idx, j, n_pts_curr
                 )
-                contributions_curr = [(p, ray_curr, cam_centre_curr) for p in planes_curr]
-            
-                # Prev view matches
-                ray_prev = get_visual_ray(P_prev, contour_prev[idx_prev], cam_centre_prev)
                 planes_prev = backproject_tangent_plane_analytic(
                     P_prev, view_prev.splines_tck, view_prev.splines_u, contour_idx, idx_prev, n_pts_prev
                 )
-                contributions_prev = [(p, ray_prev, cam_centre_prev) for p in planes_prev]
-            
-                # Next view matches
-                ray_next = get_visual_ray(P_next, contour_next[idx_next], cam_centre_next)
                 planes_next = backproject_tangent_plane_analytic(
                     P_next, view_next.splines_tck, view_next.splines_u, contour_idx, idx_next, n_pts_next
                 )
+
+                contributions_curr = [(p, ray_curr, cam_centre_curr) for p in planes_curr]
+                contributions_prev = [(p, ray_prev, cam_centre_prev) for p in planes_prev]
                 contributions_next = [(p, ray_next, cam_centre_next) for p in planes_next]
+
+                # basically get a plane triple {r~∗(s,t−1),r~∗(s,t),r~∗(s,t+1)} for each control point s
             
                 # kims tangent heuristic,.
                 # each contribution is a plane, its corresponding ray direction from the camera centre, and the actual camera centre
