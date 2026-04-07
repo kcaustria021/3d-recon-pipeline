@@ -4,19 +4,14 @@ import cv2
 import glob
 import argparse
 import os
+import matplotlib.pyplot as plt
 
 # class imports
 from utils_sfs import View
 from utils_sfs import Node
 
 # function imports
-from utils_sfs import carve_voxels
-from utils_sfs import compute_bounds
-from utils_sfs import cubify
-from utils_sfs import export_to_ply
-from utils_sfs import get_fundamental_matrices
-from utils_sfs import extract_contours
-from utils_sfs import reconstruct
+from utils_sfs import *
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -96,7 +91,6 @@ def main():
     x_min, y_min, z_min = cube_min
     x_max, y_max, z_max = cube_max
 
-    # initialize octree
     if sfs_method == "volumetric":
         # vanilla sfs
         octree_root = Node(bounds=(x_min, x_max, y_min, y_max, z_min, z_max), max_depth=6)
@@ -105,11 +99,11 @@ def main():
 
         export_to_ply(octree_root, output_file)
     elif sfs_method == "halfspace":
-        # halfspace
+        # dual space
+        view_trial = views[0]
         Fs = get_fundamental_matrices(views)
         print("Recovering surface points...")
         surface_pts = reconstruct(views, Fs)
-        print(surface_pts[0])
         
         np.save(output_file, surface_pts)
         print(f"Saved {surface_pts.shape[0]} points to {output_file}")

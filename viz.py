@@ -16,7 +16,7 @@ def main():
         pcd = o3d.geometry.PointCloud()
 
         pcd.points = o3d.utility.Vector3dVector(pts)
-        
+
         o3d.visualization.draw_geometries([pcd])
     elif input_path.endswith(".ply"):
         pcd = o3d.io.read_point_cloud(input_path)
