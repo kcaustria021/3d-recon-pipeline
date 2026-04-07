@@ -407,11 +407,16 @@ def get_tangent_lines(contours):
         pt_prev = contours[(i-1) % len(contours)]
         pt_next = contours[(i+1) % len(contours)]
 
-        t_i = pt_next - pt_prev
-        t_i_norm = np.linalg.norm(t_i)
-        a, b = t_i / t_i_norm
+        t_i = pt_next - pt_prev # difference between points, centered diff derivative
+        t_i_norm = np.linalg.norm(t_i) # normalize to get direction
+        dx, dy = t_i / t_i_norm
+
+        a, b = -dy, dx
+        #a, b = dx, dy
         c = -a * x - b * y
+
         ell = np.array([a, b, c], dtype=np.float32)
+
         tangents.append(ell)
     return np.array(tangents)
 
@@ -486,8 +491,8 @@ def reconstruct(views, Fs):
     surface_points = []
     for i in range(len(views)):
         view_curr = views[i]
-        view_prev = views[(i-2) % len(views)]
-        view_next = views[(i+2) % len(views)]
+        view_prev = views[(i-1) % len(views)]
+        view_next = views[(i+1) % len(views)]
 
         P_curr = view_curr.P
         P_prev = view_prev.P
@@ -508,14 +513,14 @@ def reconstruct(views, Fs):
         valid_pts = []
         for j in range(contour_curr.shape[0]):
             pt_prev, idx_prev = symmetric_match(
-                    Fs[i][(i-2) % len(views)],
-                    Fs[(i-2) % len(views)][i],
+                    Fs[i][(i-1) % len(views)],
+                    Fs[(i-1) % len(views)][i],
                     contour_curr[j],
                     contour_prev,
                     contour_curr)
             pt_next, idx_next = symmetric_match(
-                    Fs[i][(i+2) % len(views)],
-                    Fs[(i+2) % len(views)][i],
+                    Fs[i][(i+1) % len(views)],
+                    Fs[(i+1) % len(views)][i],
                     contour_curr[j],
                     contour_next,
                     contour_curr)

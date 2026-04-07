@@ -99,14 +99,8 @@ def main():
 
         export_to_ply(octree_root, output_file)
     elif sfs_method == "halfspace":
-<<<<<<< HEAD
-        # halfspace
-        masks = [view.get_mask() for _ in masks]
-        Ps = [view.get_proj() for view in views]
-=======
         # dual space
         view_trial = views[0]
->>>>>>> e6abdc39d75524d450070182d4c0ef39626d5d94
         Fs = get_fundamental_matrices(views)
         print("Recovering surface points...")
         surface_pts = reconstruct(views, Fs)
