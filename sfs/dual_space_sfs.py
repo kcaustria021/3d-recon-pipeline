@@ -1,10 +1,12 @@
+# pylint: disable=consider-using-enumerate
+
 from typing import List
 import numpy as np
 import cv2
 from scipy.interpolate import splprep, splev
 from numpy import typing as npt
 
-from utils_sfs import get_distance_map, symmetric_match
+from utils_sfs import get_distance_map, symmetric_match, project_points
 
 def extract_contours_multi(mask):
     """
@@ -144,19 +146,181 @@ def get_3_plane_set(views: List[View2], Fs, contour_idx: int, s_idx: int, t: int
 
     return [plane_prev, plane_curr, plane_next]
 
-def reconstruct2(views: List[View2], Fs):
+def get_gaussian_weight(ds, dt, sigma_s=2.0, sigma_t=1.0):
     """
-    # get 3-plane set {r~∗(s,t−1),r~∗(s,t),r~∗(s,t+1)} for each control point s
-    # get the same thing for neighbors (s-e, s+e)
-    # compute weights for each of these guys with a gaussian
-    # large weight on principal plane r~∗(s,t) and on the visual ray constraint (O(t) x w(s, t)) * X = 0
-    # stack all of them into a matrix and put MX = 0, solve with SVD or regression (fix W to 1, may not work at POI)
+    Computes a 2D Gaussian penalty over the contour step (ds) 
+    and the time step (dt).
     """
+    return np.exp(-(ds**2 / (2 * sigma_s**2)) - (dt**2 / (2 * sigma_t**2)))
 
-    for view_idx, view in enumerate(views):
-        for contour_idx, contour in enumerate(view.contours):
-            for s_idx in range(len(contour)): # s is a point on the cv2 countour [x, y]
-                plane_triple = get_3_plane_set(views, Fs, contour_idx, s_idx, view_idx)
-                if plane_triple is not None:
-                    print(plane_triple)
-    return
+
+def get_ray_direction(view, u, v):
+    """
+    Computes the normalized 3D ray direction vector from the camera center 
+    through the 2D pixel coordinate.
+    """
+    K_inv = np.linalg.inv(view.K)
+    ray_cam = K_inv @ np.array([u, v, 1.0])
+    ray_world = view.R.T @ ray_cam
+    return ray_world / np.linalg.norm(ray_world)
+
+def get_visual_ray(P, pt, cam_centre):
+    pt_h = np.array([pt[0], pt[1], 1.0], dtype=np.float32) # homogenous point
+    ray = np.linalg.pinv(P) @ pt_h # back project point and produce a world point
+    ray = ray[:3] / ray[3] - cam_centre # world point displacement from camera centre
+    return ray / np.linalg.norm(ray)
+
+def backproject_tangent_plane_analytic(P, splines_tck, splines_u, contour_idx, s_idx, n_pts, window_s=2):
+    """
+    Analytically maps the integer neighborhood indices back to the smooth B-splines
+    to generate mathematically exact local tangent envelopes.
+    """
+    planes = []
+    tck = splines_tck[contour_idx]
+    u = splines_u[contour_idx]
+    
+    for i in range(-window_s, window_s + 1):
+        j = (s_idx + i) % n_pts
+        s = u[j]
+        plane = get_tangent_plane_analytic(P, tck, s)
+        planes.append(plane)
+        
+    return planes
+
+def compute_weighted_tangent(contributions, ray_curr, cam_centre_curr):
+    consistent = []
+    for p, r, c in contributions:
+        # normalize planes
+        p_normalized = p / np.linalg.norm(p[:3])
+        # consistent orientation: camera outside the plane
+        if np.dot(p_normalized[:3], ray_curr) < 0:
+            p_normalized = -p_normalized
+        consistent.append((p_normalized, r, c))
+
+    # 1 / |n * r| ie weight by perpendicularity of ray to the tangent plane, it decays quadratically
+    weights = np.array([np.abs(np.dot(p[:3] / p[3], r)) for p, r, c in consistent])
+    weights = 1.0 / (weights + 1e-8)
+    weights /= weights.sum()
+
+    # there must be a better way than to use the average plane 
+    avg_plane = sum(w * p for w, (p, r, c) in zip(weights, consistent))
+    n, d = avg_plane[:3], avg_plane[3]
+
+    # solve for depth, X = C + t * R, nX + d = 0 solve for t.
+    denom = n @ ray_curr
+    t = -(n @ cam_centre_curr + d) / denom
+
+    # skip degenerate endpoints
+    if np.abs(denom) < 1e-2 or t < 0:
+        return None
+
+    return cam_centre_curr + t * ray_curr
+
+def reconstruct2(views, Fs, window_s=2):
+    """
+    1. get 3-plane set {r~∗(s,t−1),r~∗(s,t),r~∗(s,t+1)} for each control point s
+    2. get the same thing for neighbors (s-e, s+e)
+    3. compute weights for each of these guys with a gaussian
+    4. large weight on principal plane r~∗(s,t) and on the visual ray constraint (O(t) x w(s, t)) * X = 0
+    5. stack all of them into a matrix and put MX = 0, solve with SVD or regression (fix W to 1, may not work at POI)
+    6. that will give you X, now repeat for all control points.
+    """
+    surface_points = []
+    
+    for t in range(len(views)):
+        view_curr = views[t]
+        view_prev = views[(t-1) % len(views)]
+        view_next = views[(t+1) % len(views)]
+
+        P_curr = view_curr.P
+        P_prev = view_prev.P
+        P_next = view_next.P
+
+        cam_centre_curr = view_curr.cam_centre
+        cam_centre_prev = view_prev.cam_centre
+        cam_centre_next = view_next.cam_centre
+
+        valid_pts = []
+        
+        # 1. Loop through all independent contours
+        for contour_idx in range(len(view_curr.contours)): 
+            print(f"View {t}, Contour {contour_idx} of {len(view_curr.contours)}")
+            
+            # Ensure neighboring views actually saw the same number of boundaries
+            if contour_idx >= len(view_prev.contours) or contour_idx >= len(view_next.contours):
+                continue
+                
+            contour_curr = view_curr.contours[contour_idx]
+            contour_prev = view_prev.contours[contour_idx]
+            contour_next = view_next.contours[contour_idx]
+            
+            n_pts_curr = len(contour_curr)
+            n_pts_prev = len(contour_prev)
+            n_pts_next = len(contour_next)
+
+            # 2. Iterate points exactly along the continuous spline
+            for j in range(n_pts_curr):
+                pt_prev, idx_prev = symmetric_match(
+                        Fs[t][(t-1) % len(views)],
+                        Fs[(t-1) % len(views)][t],
+                        contour_curr[j], contour_prev, contour_curr)
+                        
+                pt_next, idx_next = symmetric_match(
+                        Fs[t][(t+1) % len(views)],
+                        Fs[(t+1) % len(views)][t],
+                        contour_curr[j], contour_next, contour_curr)
+
+                if pt_prev is None or pt_next is None or idx_prev is None or idx_next is None:
+                    continue
+
+                # ray & planes for current view
+                ray_curr = get_visual_ray(P_curr, contour_curr[j], cam_centre_curr)
+                planes_curr = backproject_tangent_plane_analytic(
+                    P_curr, view_curr.splines_tck, view_curr.splines_u, contour_idx, j, n_pts_curr
+                )
+                contributions_curr = [(p, ray_curr, cam_centre_curr) for p in planes_curr]
+            
+                # Prev view matches
+                ray_prev = get_visual_ray(P_prev, contour_prev[idx_prev], cam_centre_prev)
+                planes_prev = backproject_tangent_plane_analytic(
+                    P_prev, view_prev.splines_tck, view_prev.splines_u, contour_idx, idx_prev, n_pts_prev
+                )
+                contributions_prev = [(p, ray_prev, cam_centre_prev) for p in planes_prev]
+            
+                # Next view matches
+                ray_next = get_visual_ray(P_next, contour_next[idx_next], cam_centre_next)
+                planes_next = backproject_tangent_plane_analytic(
+                    P_next, view_next.splines_tck, view_next.splines_u, contour_idx, idx_next, n_pts_next
+                )
+                contributions_next = [(p, ray_next, cam_centre_next) for p in planes_next]
+            
+                # kims tangent heuristic,.
+                # each contribution is a plane, its corresponding ray direction from the camera centre, and the actual camera centre
+                all_contributions = contributions_curr + contributions_prev + contributions_next
+                # weighted tangent of the dual gives back a 3d point in primal
+                pt = compute_weighted_tangent(all_contributions, ray_curr, cam_centre_curr)
+                
+                if pt is not None:
+                    valid_pts.append(pt)
+
+        # check if points actually project back into the mask
+        for pt in valid_pts:
+            is_valid = True
+            for view in views:
+                mask = view.mask
+                h, w = mask.shape
+                pt_proj = project_points(view.P, pt)
+                u, v = pt_proj[0] if pt_proj.ndim == 2 else pt_proj
+                
+                if u < 0 or u >= w or v < 0 or v >= h:
+                    is_valid = False
+                    break
+
+                if mask[int(v), int(u)] == 0:
+                    is_valid = False
+                    break
+                    
+            if is_valid:
+                surface_points.append(pt)
+                
+    return np.array(surface_points)
