@@ -12,6 +12,7 @@ from utils_sfs import Node
 
 # function imports
 from utils_sfs import *
+import dual_space_sfs
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -79,10 +80,10 @@ def main():
         if single_view:
             best_view = 3 # selected at random
             proj_dict = projs[f"view{best_view:05d}"].item()
-            view = View(imgs[i], masks[i], proj_dict)
+            view = dual_space_sfs.View2(imgs[i], masks[i], proj_dict)
         else:
             proj_dict = projs[f"view{i:05d}"].item()
-            view = View(imgs[i], masks[i], proj_dict)
+            view = dual_space_sfs.View2(imgs[i], masks[i], proj_dict)
 
         views.append(view)
 
@@ -103,7 +104,7 @@ def main():
         view_trial = views[0]
         Fs = get_fundamental_matrices(views)
         print("Recovering surface points...")
-        surface_pts = reconstruct(views, Fs)
+        surface_pts = dual_space_sfs.reconstruct2(views, Fs)
         
         np.save(output_file, surface_pts)
         print(f"Saved {surface_pts.shape[0]} points to {output_file}")

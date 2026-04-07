@@ -1,3 +1,5 @@
+from typing import List
+
 import numpy as np
 from numpy import typing as npt
 import cv2
@@ -400,6 +402,7 @@ def extract_contours(mask):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     return contours[0].squeeze()
 
+
 def get_tangent_lines(contours):
     tangents = []
     for i in range(contours.shape[0]):
@@ -489,7 +492,7 @@ def compute_weighted_tangent(contributions, ray_curr, cam_centre_curr):
 
 def reconstruct(views, Fs):
     surface_points = []
-    for i in range(len(views)):
+    for i in range(len(views)): # pylint: disable=consider-using-enumerate
         view_curr = views[i]
         view_prev = views[(i-1) % len(views)]
         view_next = views[(i+1) % len(views)]
