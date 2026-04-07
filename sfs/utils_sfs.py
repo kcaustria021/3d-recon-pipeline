@@ -2,7 +2,6 @@ import numpy as np
 from numpy import typing as npt
 import cv2
 import os
-from scipy.interpolate import interp1d
 
 """
 CLASSES
@@ -13,27 +12,31 @@ class View:
     """
     def __init__(self, img_path:str, mask_path:str, proj_props:npt.NDArray):
         self.img = np.array(cv2.imread(img_path))
-        self.img = cv2.cvtColor(self.img, cv2.COLOR_BGR2GRAY)
 
         self.mask = np.array(cv2.imread(mask_path))
         self.mask = cv2.cvtColor(self.mask, cv2.COLOR_BGR2GRAY)
 
         self.mask[self.mask > 0] = 1
         self.mask = self.mask.astype(bool)
-        self.proj_props = proj_props
+
+        self.contours = extract_contours(self.mask)
+
+        self.tangents = get_tangent_lines(self.contours)
 
         self.dst_bg = get_distance_map((self.mask).astype(np.uint8))
         self.dst_fg = get_distance_map((~self.mask).astype(np.uint8))
 
         # compute projection matrix
+        self.proj_props = proj_props
         try:
             self.K = self.proj_props.get("K")
             self.R = self.proj_props.get("R")
-            self.t = np.expand_dims(self.proj_props.get("t"), axis=1)
+            self.t = self.proj_props.get("t").reshape(3, 1)
             self.dist = self.proj_props.get("dist")
-
             rt = np.hstack((self.R, self.t))
             self.P = self.K @ rt
+            _, _, Vt = np.linalg.svd(self.P)
+            self.cam_centre = Vt[-1, :3] / Vt[-1, 3]
         except Exception as e:
             print(f"Computing projection matrix failed: {e}")
 
@@ -115,7 +118,6 @@ class Node:
 """
 GENERAL
 """
-
 def skew(v):
     if v.ndim > 1:
         v = np.squeeze(v, axis=1)
@@ -149,8 +151,12 @@ def unhomogenize(vec: npt.NDArray):
     """
     Unhomogenizes a vector
     """
-    n = vec.shape[0] - 1
-    return vec[:n] / vec[n]
+    if len(vec.shape) == 1:
+        n = vec.shape[0] - 1
+        return vec[:n] / vec[n]
+    elif len(vec.shape) == 2:
+        n = vec.shape[1] - 1
+        return vec[:, :n] / np.clip(np.expand_dims(vec[:, n], axis=1), 1e-6, None)
 
 def get_vid_frames(vid_path, output_path):
     cap = cv2.VideoCapture(vid_path)
@@ -178,22 +184,26 @@ def project_points(P, X):
     Projects a 3d point X to 2d point x using P
     """
     result = P @ homogenize(X).T
-    return unhomogenize(result)
+    return unhomogenize(result.T)
 
 def get_fundamental_matrices(views):
     Fs = dict()
     for i, view_i in enumerate(views):
         Fs[i] = dict()
         K_i, R_i, t_i, _ = view_i.get_proj(decomp=True)
-        K_i_inv = np.linalg.inv(K_i)
+        C_i = -R_i.T @ t_i  # camera centre in world space
         for j, view_j in enumerate(views):
             if i == j:
                 continue
             K_j, R_j, t_j, _ = view_j.get_proj(decomp=True)
-            K_j_inv = np.linalg.inv(K_j)
+            C_j = -R_j.T @ t_j
+
             R_ij = R_j @ R_i.T
-            t_ij = t_j - R_ij @ t_i
-            Fs[i][j] = K_j_inv.T @ skew(t_ij) @ R_ij @ K_i_inv
+            t_ij = R_j @ (C_i - C_j)
+
+            E = skew(t_ij) @ R_ij
+            Fs[i][j] = np.linalg.inv(K_j).T @ E @ np.linalg.inv(K_i)
+            Fs[i][j] /= np.linalg.norm(Fs[i][j])
     return Fs
 
 """
@@ -243,9 +253,8 @@ def cubify(min_bound, max_bound):
     return new_min, new_max
 
 def get_distance_map(img):
-    # cv2.distanceTransform requires uint8 input
-    img_uint8 = img.astype(np.uint8)
-    dst = cv2.distanceTransform(img_uint8, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    img= img.astype(np.uint8)
+    dst = cv2.distanceTransform(img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     return dst
 
 def classify_node(node, views):
@@ -259,38 +268,30 @@ def classify_node(node, views):
         dst_fg = view.dst_fg
         h, w = dst_fg.shape
 
-        corners_proj = project_points(P, corners).T  # 8 x 2
-        centre_proj = project_points(P, centre.reshape(1, 3)).T  # 1 x 2
+        corners_proj = project_points(P, corners)  # 8 x 2
+        centre_proj = project_points(P, centre.reshape(1, 3)).T  # 2 x 1
 
         if corners_proj is None or centre_proj is None:
             return "empty"
 
-        u_centre, v_centre = centre_proj[0]
-        u_centre_i = int(np.round(u_centre))
-        v_centre_i = int(np.round(v_centre))
+        u_centre, v_centre = centre_proj
+        u_centre_i = int(np.round(u_centre[0]))
+        v_centre_i = int(np.round(v_centre[0]))
 
-        # Compute bounding radius from corners to centre in projection
         u_sq_diffs = np.square(corners_proj[:, 0] - u_centre)
         v_sq_diffs = np.square(corners_proj[:, 1] - v_centre)
         r = float(np.max(np.sqrt(u_sq_diffs + v_sq_diffs)))
 
-        # --- FIX 1: Don't reject just because centre is outside image ---
-        # Instead, clamp the centre to image bounds for distance lookups,
-        # or use corner projections directly.
         centre_in_image = (
             0 <= u_centre_i < w and 0 <= v_centre_i < h
         )
 
         if centre_in_image:
-            # Standard check: is the node completely outside the foreground?
             if dst_fg[v_centre_i, u_centre_i] > r:
                 return "empty"
-            # Is the node completely inside for this view?
             if dst_bg[v_centre_i, u_centre_i] <= r:
-                all_inside = False  # boundary node — not fully inside
+                all_inside = False
         else:
-            # --- FIX 2: Centre outside image; check corners individually ---
-            # If ALL corners project outside the image, node is empty
             u_corners = corners_proj[:, 0]
             v_corners = corners_proj[:, 1]
             any_corner_in_image = np.any(
@@ -300,17 +301,14 @@ def classify_node(node, views):
             if not any_corner_in_image:
                 return "empty"
 
-            # Check each corner that lands in-image against distance transforms
             corner_statuses = []
             for u_c, v_c in zip(u_corners, v_corners):
                 u_ci, v_ci = int(np.round(u_c)), int(np.round(v_c))
                 if 0 <= u_ci < w and 0 <= v_ci < h:
-                    # Is this corner inside the silhouette?
                     corner_statuses.append(mask[v_ci, u_ci] > 0)
 
             if len(corner_statuses) == 0 or not any(corner_statuses):
                 return "empty"
-            # Mixed or partially inside → treat as unknown boundary
             all_inside = False
 
     if all_inside:
@@ -342,6 +340,58 @@ def carve_voxels(node, views):
 HALF-SPACE SFS
 """
 
+def get_point_status(Xs, views, eps_init=2.0):
+    eps = eps_init * len(views) / 10
+    n_pts = Xs.shape[0]
+    status = np.full(n_pts, 2, dtype=int)
+
+    for view in views:
+        P = view.get_proj()
+        dst_map = view.dst_bg
+        mask = view.mask
+        h, w = dst_map.shape
+
+        X_proj = project_points(P, Xs)
+        u, v = X_proj[:, 0], X_proj[:, 1]
+
+        # check out of bounds
+        in_img = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        status[~in_img] = 0
+        
+        # check remaining points
+        idx = np.where(status > 0)[0]
+        u_int = np.floor(u[idx]).astype(np.int32)
+        v_int = np.floor(v[idx]).astype(np.int32)
+        
+        m_vals = mask[v_int, u_int]
+        d_vals = dst_map[v_int, u_int]
+
+        # completely outside for one view
+        is_outside = (m_vals == 0)
+        status[idx[is_outside]] = 0
+
+        # Mark points near the boundary as "pending" (1) if they weren't already marked outside (0)
+        is_pending = (m_vals > 0) & (d_vals <= eps)
+        # Only update if it wasn't already set to 0
+        pending_indices = idx[is_pending]
+        status[pending_indices] = np.minimum(status[pending_indices], 1)
+
+    return status
+
+def interpolate(X, direction, views, status, n_iters=5):
+    low, high = 0.0, 1.0
+    X_ref = X
+    for _ in range(n_iters):
+        mid = (low + high) / 2
+        X_test = X + direction * mid
+        test_status = get_point_status(X_test[np.newaxis], views)[0]
+        if test_status == 0:
+            high = mid
+        else:
+            low = mid
+            X_ref = X_test
+    return X_ref
+
 def extract_contours(mask):
     """
     Get contours from the binary masks
@@ -349,6 +399,21 @@ def extract_contours(mask):
     mask = mask.astype(np.uint8)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     return contours[0].squeeze()
+
+def get_tangent_lines(contours):
+    tangents = []
+    for i in range(contours.shape[0]):
+        x, y = contours[i]
+        pt_prev = contours[(i-1) % len(contours)]
+        pt_next = contours[(i+1) % len(contours)]
+
+        t_i = pt_next - pt_prev
+        t_i_norm = np.linalg.norm(t_i)
+        a, b = t_i / t_i_norm
+        c = -a * x - b * y
+        ell = np.array([a, b, c], dtype=np.float32)
+        tangents.append(ell)
+    return np.array(tangents)
 
 def get_epipolar_line(F, pt):
     """
@@ -359,94 +424,156 @@ def get_epipolar_line(F, pt):
 
 def find_epipolar_match(line, contour):
     """
-    Find the point in another image corresponding to the
-    epipolar constraint
+    Find corresponding point along epipolar line
     """
     a, b, c = line
     dists = np.abs(a * contour[:, 0] + b * contour[:, 1] + c) / np.sqrt(a**2 + b**2)
     min_idx = np.argmin(dists)
-    return contour[min_idx]
+    return contour[min_idx], min_idx
 
 def symmetric_match(F_ij, F_ji, pt_i, contour_j, contour_i):
     """
-    Determine whether a match x_i -> x_k also has match x_k -> x_i
-    within some error bound
+    Make sure epipolar matches go both ways view i -> view k and view_k -> view_i
     """
-    pt_j = find_epipolar_match(get_epipolar_line(F_ij, pt_i), contour_j)
-    pt_i_back = find_epipolar_match(get_epipolar_line(F_ji, pt_j), contour_i)
-    return pt_j if np.linalg.norm(pt_i - pt_i_back) < 2.0 else None
+    pt_j, idx_j = find_epipolar_match(get_epipolar_line(F_ij, pt_i), contour_j)
+    pt_i_back, _ = find_epipolar_match(get_epipolar_line(F_ji, pt_j), contour_i)
+    return pt_j, idx_j if np.linalg.norm(pt_i - pt_i_back) < 2.0 else None
 
-def backproject_ray(P, point):
-    """
-    Back-project a point to a ray
-    """
-    x = homogenize(point)
-    ray = np.linalg.pinv(P) @ x
-    return unhomogenize(ray)
+def backproject_tangent_plane(P, tangents, pts, idx, n_pts=2):
+    planes = []
+    for i in range(-n_pts, n_pts+1, 1):
+        j = (idx + i) % len(pts)
+        tangent_line = tangents[j]
+        plane = P.T @ tangent_line
+        plane /= np.linalg.norm(plane[:3])
+        planes.append(plane)
+    return planes
 
-def triangulate(P1, P2, pt1, pt2):
-    """
-    Triangulate a 3d point using projection matrices and 2d points
-    """
-    A = np.array([
-        pt1[0] * P1[2] - P1[0],
-        pt1[1] * P1[2] - P1[1],
-        pt2[0] * P2[2] - P2[0],
-        pt2[1] * P2[2] - P2[1],
-    ])
-    _, _, Vt = np.linalg.svd(A)
-    X = Vt[-1]
-    return unhomogenize(X)
+def get_visual_ray(P, pt, cam_centre):
+    pt_h = homogenize(pt)
+    ray = np.linalg.pinv(P) @ pt_h
+    ray = ray[:3] / ray[3] - cam_centre
+    return ray / np.linalg.norm(ray)
 
-def inside_silhouette(pt, mask):
-    """
-    Check whether a point is inside the object in a binary mask
-    """
-    x, y = int(round(pt[0])), int(round(pt[1]))
-    if x < 0 or y < 0 or y >= mask.shape[0] or x >= mask.shape[1]:
-        return False
-    return mask[y, x] > 0
+def compute_weighted_tangent(contributions, ray_curr, cam_centre_curr):
+    consistent = []
+    for p, r, c in contributions:
+        # normalize planes
+        p_normalized = p / np.linalg.norm(p[:3])
+        # make sure signs are consistent
+        # camera outside the plane
+        if np.dot(p_normalized[:3], ray_curr) < 0:
+            p_normalized = -p_normalized
+        consistent.append((p_normalized, r, c))
 
-def reconstruct(P_list, silhouettes, contours, F_matrices):
-    """
-    Perform the reconstruction
-    """
+    weights = np.array([np.abs(np.dot(p[:3], r)) for p, r, c in consistent])
+    weights = 1.0 / (weights + 1e-8)
+    weights /= weights.sum()
+
+    avg_plane = sum(w * p for w, (p, r, c) in zip(weights, consistent))
+    n, d = avg_plane[:3], avg_plane[3]
+
+    denom = n @ ray_curr
+    t = -(n @ cam_centre_curr + d) / denom
+
+    # skip degenerate points
+    if np.abs(denom) < 1e-2 or t < 0:
+        return None
+
+    return cam_centre_curr + t * ray_curr
+
+def reconstruct(views, Fs):
     surface_points = []
-    for i, contour_i in enumerate(contours):
-        for pt_i in contour_i:
-            valid_points = []
-            for k in range(len(contours)):
-                if k == i:
-                    continue
-                pt_k = symmetric_match(
-                    F_matrices[i][k],
-                    F_matrices[k][i],
-                    pt_i,
-                    contours[k],
-                    contour_i
-                )
-                if pt_k is not None:
-                    # guess a 3d point
-                    X = triangulate(P_list[i], P_list[k], pt_i, pt_k)
-                    valid_points.append(X)
+    for i in range(len(views)):
+        view_curr = views[i]
+        view_prev = views[(i-2) % len(views)]
+        view_next = views[(i+2) % len(views)]
 
-            if len(valid_points) >= 2:
-                X_avg = np.mean(valid_points, axis=0)
-                good_pt = True
-                for cam, mask in zip(P_list, silhouettes):
-                    proj = project_points(cam, X_avg)
-                    if not inside_silhouette(proj, mask):
-                        good_pt = False
-                        break
-                if good_pt:
-                    surface_points.append(X_avg)
+        P_curr = view_curr.P
+        P_prev = view_prev.P
+        P_next = view_next.P
 
+        contour_curr = view_curr.contours
+        contour_prev = view_prev.contours
+        contour_next = view_next.contours
+
+        tangents_curr = view_curr.tangents
+        tangents_prev = view_prev.tangents
+        tangents_next = view_next.tangents
+
+        cam_centre_curr = view_curr.cam_centre
+        cam_centre_prev = view_prev.cam_centre
+        cam_centre_next = view_next.cam_centre
+
+        valid_pts = []
+        for j in range(contour_curr.shape[0]):
+            pt_prev, idx_prev = symmetric_match(
+                    Fs[i][(i-2) % len(views)],
+                    Fs[(i-2) % len(views)][i],
+                    contour_curr[j],
+                    contour_prev,
+                    contour_curr)
+            pt_next, idx_next = symmetric_match(
+                    Fs[i][(i+2) % len(views)],
+                    Fs[(i+2) % len(views)][i],
+                    contour_curr[j],
+                    contour_next,
+                    contour_curr)
+
+            if pt_prev is None or pt_next is None or idx_prev is None or idx_next is None:
+                # null
+                continue
+
+            # current view
+            ray_curr = get_visual_ray(P_curr, contour_curr[j], cam_centre_curr)
+            planes_curr = backproject_tangent_plane(
+                P_curr, tangents_curr, contour_curr, j
+            )
+            contributions_curr = [(p, ray_curr, cam_centre_curr) for p in planes_curr]
+        
+            # prev view
+            ray_prev = get_visual_ray(P_prev, contour_prev[idx_prev], cam_centre_prev)
+            planes_prev = backproject_tangent_plane(
+                P_prev, tangents_prev, contour_prev, idx_prev
+            )
+            contributions_prev = [(p, ray_prev, cam_centre_prev) for p in planes_prev]
+        
+            # next view
+            ray_next = get_visual_ray(P_next, contour_next[idx_next], cam_centre_next)
+            planes_next = backproject_tangent_plane(
+                P_next, tangents_next, contour_next, idx_next
+            )
+            contributions_next = [(p, ray_next, cam_centre_next) for p in planes_next]
+        
+            all_contributions = contributions_curr + contributions_prev + contributions_next
+            pt =compute_weighted_tangent(all_contributions, ray_curr, cam_centre_curr)
+            if pt is None:
+                continue
+            valid_pts.append(pt)
+
+        valid_pts = np.array(valid_pts)
+        statuses = get_point_status(valid_pts, views)
+
+        mask_curr = view_curr.mask
+        h, w = mask_curr.shape
+        for pt in valid_pts:
+            is_valid = True
+            for view in views:
+                mask = view.mask
+                h, w = mask.shape
+                pt_proj = project_points(view.P, pt)
+                u, v = pt_proj
+                if u < 0 or u >= w or v < 0 or v >= h:
+                    is_valid = False
+                    break
+
+                if mask[int(v), int(u)] == 0:
+                    is_valid = False
+                    break
+            if is_valid:
+                surface_points.append(pt)
     return np.array(surface_points)
-
-def interpolate_points(points):
-    known = np.array([p for p in points if p is not None])
-    return known
-
+            
 """
 I/O
 """
@@ -482,3 +609,123 @@ end_header
         except Exception as e:
             print(e)
     print(f"Saved {len(points)} voxels to {filename}")
+
+
+"""
+TESTING
+"""
+
+def to_gray(img):
+    if img.shape[2] == 4:
+        bgr = img[:, :, :3]
+        alpha = img[:, :, 3:] / 255.0
+        background = np.ones_like(bgr, dtype=np.uint8) * 255
+        img = (bgr * alpha + background * (1 - alpha)).astype(np.uint8)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+def show_image(name, img):
+    if img.shape[2] == 4:
+        # split into BGR and alpha
+        bgr = img[:, :, :3]
+        alpha = img[:, :, 3:] / 255.0
+        # composite against white background
+        background = np.ones_like(bgr, dtype=np.uint8) * 255
+        img = (bgr * alpha + background * (1 - alpha)).astype(np.uint8)
+    cv2.imshow(name, img)
+
+def get_display_image(view):
+    img = view.img
+    if img.ndim == 3 and img.shape[2] == 4:
+        bgr = img[:, :, :3]
+        alpha = img[:, :, 3:] / 255.0
+        background = np.ones_like(bgr, dtype=np.uint8) * 255
+        return (bgr * alpha + background * (1 - alpha)).astype(np.uint8)
+    return img.astype(np.uint8)
+
+def test_unhomogenize():
+    arr1 = np.array([-3, -2, -1, 1])
+    arr2 = np.array([-3, 2, 1])
+    arr3 = np.array([
+        [-3, -2, -1, 1],
+        [-4, 5, 6, 1]
+    ])
+
+    print("arr1: ", arr1)
+    print("arr1 unhomo: ", unhomogenize(arr1))
+
+    print("arr2: ", arr2)
+    print("arr2 unhomo: ", unhomogenize(arr2))
+
+    print("arr3: ", arr3)
+    print("arr3 unhomo: ", unhomogenize(arr3))
+
+def verify_fundamental_matrices(Fs, views):
+    for i in range(len(views)):
+        for j in range(len(views)):
+            if i == j:
+                continue
+            F = Fs[i][j]
+            contour_i = views[i].contours
+            contour_j = views[j].contours
+            
+            for k in range(0, len(contour_i), len(contour_i) // 10):
+                pt_i = homogenize(contour_i[k, :2])
+                line = F @ pt_i
+                pt_j, _ = find_epipolar_match(line, contour_j)
+                pt_j_h = homogenize(pt_j[:2])
+                residual = pt_j_h @ F @ pt_i
+                print(f"F[{i}][{j}] residual at point {k}: {residual:.6f}")
+
+def visualize_matches(views, Fs, i, j, step=20):
+    img_i = get_display_image(views[i])
+    img_j = get_display_image(views[j])
+    contour_i = views[i].contours
+    contour_j = views[j].contours
+    w = img_i.shape[1]
+
+    combined = np.hstack([img_i, img_j])
+
+    n_matches = 0
+    for k in range(0, len(contour_i), step):
+        pt, idx = symmetric_match(
+            Fs[i][j], Fs[j][i],
+            contour_i[k], contour_j, contour_i
+        )
+        if pt is None:
+            continue
+        dy = abs(int(contour_i[k, 1]) - int(pt[1]))
+        print(f"dy = {dy}")
+        n_matches += 1
+
+        color = tuple(np.random.randint(0, 255, 3).tolist())
+        pt_i = tuple(contour_i[k, :2].astype(int))
+        pt_j = tuple((pt[:2] + np.array([w, 0])).astype(int))
+
+        cv2.circle(combined, pt_i, 4, color, -1)
+        cv2.circle(combined, pt_j, 4, color, -1)
+        cv2.line(combined, pt_i, pt_j, color, 1)
+
+    print(f"Found {n_matches} matches")
+    cv2.imshow(f"matches {i} -> {j}", combined)
+    cv2.waitKey(0)
+
+def visualize_planes(views, Fs, i):
+    for k in range(0, len(views[0].contours), 20):
+        pt_prev, idx_prev = symmetric_match(
+            Fs[0][len(views)-1], Fs[len(views)-1][0],
+            views[0].contours[k], views[len(views)-1].contours, views[0].contours
+        )
+        pt_next, idx_next = symmetric_match(
+            Fs[0][1], Fs[1][0],
+            views[0].contours[k], views[1].contours, views[0].contours
+        )
+        if pt_prev is None or pt_next is None or idx_prev is None or idx_next is None:
+            continue
+        planes_prev = backproject_tangent_plane(
+            views[len(views)-1].P,
+            views[len(views)-1].tangents,
+            views[len(views)-1].contours, idx_prev)
+        planes_next = backproject_tangent_plane(views[1].P, views[1].tangents, views[1].contours, idx_next)
+        print(f"Point {k}:")
+        print(f"  prev normal: {planes_prev[2][:3] / np.linalg.norm(planes_prev[2][:3])}")
+        print(f"  next normal: {planes_next[2][:3] / np.linalg.norm(planes_next[2][:3])}")
