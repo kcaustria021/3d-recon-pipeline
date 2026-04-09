@@ -2,7 +2,7 @@
 
 # Ensure exactly two arguments are provided
 if [ "$#" -ne 2 ]; then
-	echo "Usage: $0 {cube|real|ellipsoid|torus} {halfspace|volumetric}"
+	echo "Usage: $0 {bunny|cube|torus|ellipsoid} {halfspace|volumetric}"
 	exit 1
 fi
 
@@ -23,13 +23,13 @@ fi
 echo "Running $METHOD SfS on $MODE data..."
 
 case "$MODE" in
-	real)
+	bunny)
 		python3 "$PYTHON_SCRIPT" \
-			media/testing/test_real_data/objs \
-			media/testing/test_real_data/masks \
-			media/testing/test_real_data/real_recon_$METHOD \
-			media/testing/test_real_data/projs.npz \
-			-s $METHOD_FLAG
+			media/bunny_data/images \
+			media/bunny_data/silhouettes \
+			media/bunny_data/bunny_recon_$METHOD \
+			media/bunny_data/projs.npz \
+			$METHOD_FLAG
 		;;
 
 	cube)

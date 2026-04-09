@@ -8,52 +8,18 @@ from numpy import typing as npt
 
 from utils_sfs import get_distance_map, symmetric_match, project_points
 
-def extract_contours_multi(mask):
-    """
-    Get all contours (e.g., torus outer edge and inner hole).
-    Returns a list of contour arrays.
-    """
-    mask = mask.astype(np.uint8)
-    # Using RETR_LIST gets all contours regardless of nesting
-    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-    
-    # Filter out tiny artifacts and squeeze
-    valid_contours = []
-    for c in contours:
-        c = c.squeeze()
-        if c.ndim == 2 and c.shape[0] >= 10: 
-            valid_contours.append(c)
-    return valid_contours
-
-def fit_bspline(contours, smooth=0.0):
-    points = [contours[:, 0], contours[:, 1]]
-    tck, u = splprep(points, s=smooth, k=3, per=True)
-    return tck, u
-
-def get_tangent_plane_analytic(P, tck, s):
-    """
-    Helper to cleanly evaluate the plane at spline parameter s
-    """
-    x, y = splev(s, tck)
-    dx, dy = splev(s, tck, der=1)
-    
-    norm = np.hypot(dx, dy) + 1e-8
-    nx, ny = -dy / norm, dx / norm # normal direction (unit)
-    
-    c = -(nx * float(x) + ny * float(y))
-    l_2d = np.array([nx, ny, c], dtype=np.float32) # get 2d tangent line to s
-    
-    plane = P.T @ l_2d # back project to tgt plane
-    return plane / np.linalg.norm(plane[:3])
-
 class View2:
     def __init__(self, img_path:str, mask_path:str, proj_props:npt.NDArray):
         self.img = np.array(cv2.imread(img_path))
 
-        self.mask = np.array(cv2.imread(mask_path))
-        self.mask = cv2.cvtColor(self.mask, cv2.COLOR_BGR2GRAY)
-        self.mask[self.mask > 0] = 1
-        self.mask = self.mask.astype(bool)
+        if mask_path.endswith(".png"):
+            self.mask = np.array(cv2.imread(mask_path))
+            self.mask = cv2.cvtColor(self.mask, cv2.COLOR_BGR2GRAY)
+            self.mask[self.mask > 0] = 1
+            self.mask = self.mask.astype(bool)
+        elif mask_path.endswith(".pgm"):
+            self.mask = np.array(cv2.imread(mask_path, cv2.IMREAD_UNCHANGED))
+            self.mask = ~(self.mask.astype(bool))
 
         # Handle multiple contours
         self.contours = extract_contours_multi(self.mask)
@@ -94,6 +60,107 @@ class View2:
 
     def get_mask(self):
         return self.mask
+    
+class Node:
+    """
+    Class definition for a Node in the octree representation
+    """
+    def __init__(self, bounds, depth=0, max_depth=6):
+        """
+        Initialize
+        """
+        self.bounds = bounds # xmin, xmax, ymin, ymax, zmin, zmax
+        self.depth = depth
+        self.max_depth = max_depth
+
+        self.children = []
+        self.parent = None
+        self.state = "full"
+
+    def subdivide(self):
+        """
+        Subdivides the root node into 8 children
+        """
+        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
+        xm = (xmin + xmax) / 2
+        ym = (ymin + ymax) / 2
+        zm = (zmin + zmax) / 2
+
+        boxes = [
+                (xmin, xm, ymin, ym, zmin, zm),
+                (xm, xmax, ymin, ym, zmin, zm),
+                (xmin, xm, ymin, ym, zm, zmax),
+                (xm, xmax, ymin, ym, zm, zmax),
+                (xmin, xm, ym, ymax, zmin, zm),
+                (xm, xmax, ym, ymax, zmin, zm),
+                (xmin, xm, ym, ymax, zm, zmax),
+                (xm, xmax, ym, ymax, zm, zmax)
+                ]
+
+        self.children = [Node(b, depth=self.depth+1, max_depth = self.max_depth) for b in boxes]
+
+    def get_corners(self):
+        """
+        Get the coordinates of the corners of a node
+        """
+        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
+        return np.array([
+            [xmin, ymin, zmin],
+            [xmax, ymin, zmin],
+            [xmin, ymax, zmin],
+            [xmin, ymin, zmax],
+            [xmax, ymax, zmin],
+            [xmin, ymax, zmax],
+            [xmax, ymin, zmax],
+            [xmax, ymax, zmax]
+            ])
+
+    def get_centre(self):
+        """
+        Get the coordinates of the centre of the cube
+        """
+        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
+        return np.array([
+            (xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2
+            ])
+
+def extract_contours_multi(mask):
+    """
+    Get all contours (e.g., torus outer edge and inner hole).
+    Returns a list of contour arrays.
+    """
+    mask = mask.astype(np.uint8)
+    # Using RETR_LIST gets all contours regardless of nesting
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    
+    # Filter out tiny artifacts and squeeze
+    valid_contours = []
+    for c in contours:
+        c = c.squeeze()
+        if c.ndim == 2 and c.shape[0] >= 10: 
+            valid_contours.append(c)
+    return valid_contours
+
+def fit_bspline(contours, smooth=0.0):
+    points = [contours[:, 0], contours[:, 1]]
+    tck, u = splprep(points, s=smooth, k=3, per=True)
+    return tck, u
+
+def get_tangent_plane_analytic(P, tck, s):
+    """
+    Helper to cleanly evaluate the plane at spline parameter s
+    """
+    x, y = splev(s, tck)
+    dx, dy = splev(s, tck, der=1)
+    
+    norm = np.hypot(dx, dy) + 1e-8
+    nx, ny = -dy / norm, dx / norm # normal direction (unit)
+    
+    c = -(nx * float(x) + ny * float(y))
+    l_2d = np.array([nx, ny, c], dtype=np.float32) # get 2d tangent line to s
+    
+    plane = P.T @ l_2d # back project to tgt plane
+    return plane / np.linalg.norm(plane[:3])
 
 def get_3_plane_set(views: List[View2], Fs, contour_idx: int, s_idx: int, t: int):
     """

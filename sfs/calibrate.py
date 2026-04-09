@@ -1,6 +1,29 @@
 import cv2
 import numpy as np
 import glob
+import os
+
+def get_calib_info(filepath):
+    projs = dict()
+    for i, fname in enumerate(sorted(os.listdir(filepath))):
+        P = np.loadtxt(os.path.join(filepath, fname), skiprows=1, dtype=np.float32)
+        view_name = f"view{i:05d}"
+        K, R, t, dist = decompose(P)
+        projs[view_name] = {
+            "P": P,
+            "K": K,
+            "R": R,
+            "t": t,
+            "dist": dist
+        }
+    np.savez("media/bunny_data/projs.npz", **projs)
+
+def decompose(P):
+    K, R, T, _, _, _, _ = cv2.decomposeProjectionMatrix(P)
+    T = T.reshape(-1)
+    C = T[:3] / T[3]
+    t = -R @ C
+    return K, R, t, None
 
 def main():
     ## Code adapted from OpenCV documentation
@@ -66,6 +89,8 @@ def main():
 
     cv2.destroyAllWindows()
 
+    # calibrate for the bunny data
+    get_calib_info("media/bunny_data/calib")
 
 if __name__ == "__main__":
     main()

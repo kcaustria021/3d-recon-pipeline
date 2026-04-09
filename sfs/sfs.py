@@ -1,14 +1,10 @@
 # general imports
 import numpy as np
-import cv2
 import glob
 import argparse
 import os
-import matplotlib.pyplot as plt
 
 # class imports
-from utils_sfs import View
-from utils_sfs import Node
 
 # function imports
 from utils_sfs import *
@@ -63,9 +59,10 @@ def main():
     sfs_method = args.method
 
     # assert output_file.endswith(".ply"), "Output file must be a .ply file"
-
-    imgs = sorted(glob.glob(os.path.join(imgs_path, "*.png")))
-    masks = sorted(glob.glob(os.path.join(masks_path, "*.png")))
+    # imgs = sorted(glob.glob(os.path.join(imgs_path, "*.png")))
+    # masks = sorted(glob.glob(os.path.join(masks_path, "*.png")))
+    imgs = sorted(glob.glob(os.path.join(imgs_path, "*.ppm")))
+    masks = sorted(glob.glob(os.path.join(masks_path, "*.pgm")))
 
     assert len(imgs) == len(masks), "Number of images must match number of masks"
     n_views = len(imgs)
@@ -94,7 +91,7 @@ def main():
 
     if sfs_method == "volumetric":
         # vanilla sfs
-        octree_root = Node(bounds=(x_min, x_max, y_min, y_max, z_min, z_max), max_depth=6)
+        octree_root = dual_space_sfs.Node(bounds=(x_min, x_max, y_min, y_max, z_min, z_max), max_depth=6)
         print("Carving voxels...")
         carve_voxels(octree_root, views)
 

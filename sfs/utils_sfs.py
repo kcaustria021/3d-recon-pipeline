@@ -6,121 +6,12 @@ import cv2
 import os
 
 """
-CLASSES
-"""
-class View:
-    """
-    Class definition for a View
-    """
-    def __init__(self, img_path:str, mask_path:str, proj_props:npt.NDArray):
-        self.img = np.array(cv2.imread(img_path))
-
-        self.mask = np.array(cv2.imread(mask_path))
-        self.mask = cv2.cvtColor(self.mask, cv2.COLOR_BGR2GRAY)
-
-        self.mask[self.mask > 0] = 1
-        self.mask = self.mask.astype(bool)
-
-        self.contours = extract_contours(self.mask)
-
-        self.tangents = get_tangent_lines(self.contours)
-
-        self.dst_bg = get_distance_map((self.mask).astype(np.uint8))
-        self.dst_fg = get_distance_map((~self.mask).astype(np.uint8))
-
-        # compute projection matrix
-        self.proj_props = proj_props
-        try:
-            self.K = self.proj_props.get("K")
-            self.R = self.proj_props.get("R")
-            self.t = self.proj_props.get("t").reshape(3, 1)
-            self.dist = self.proj_props.get("dist")
-            rt = np.hstack((self.R, self.t))
-            self.P = self.K @ rt
-            _, _, Vt = np.linalg.svd(self.P)
-            self.cam_centre = Vt[-1, :3] / Vt[-1, 3]
-        except Exception as e:
-            print(f"Computing projection matrix failed: {e}")
-
-    def get_proj(self, decomp=False):
-        if not decomp:
-            return self.P
-        else:
-            return self.K, self.R, self.t, self.dist
-
-    def get_img(self):
-        return self.img
-
-    def get_mask(self):
-        return self.mask
-
-class Node:
-    """
-    Class definition for a Node in the octree representation
-    """
-    def __init__(self, bounds, depth=0, max_depth=6):
-        """
-        Initialize
-        """
-        self.bounds = bounds # xmin, xmax, ymin, ymax, zmin, zmax
-        self.depth = depth
-        self.max_depth = max_depth
-
-        self.children = []
-        self.parent = None
-        self.state = "full"
-
-    def subdivide(self):
-        """
-        Subdivides the root node into 8 children
-        """
-        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
-        xm = (xmin + xmax) / 2
-        ym = (ymin + ymax) / 2
-        zm = (zmin + zmax) / 2
-
-        boxes = [
-                (xmin, xm, ymin, ym, zmin, zm),
-                (xm, xmax, ymin, ym, zmin, zm),
-                (xmin, xm, ymin, ym, zm, zmax),
-                (xm, xmax, ymin, ym, zm, zmax),
-                (xmin, xm, ym, ymax, zmin, zm),
-                (xm, xmax, ym, ymax, zmin, zm),
-                (xmin, xm, ym, ymax, zm, zmax),
-                (xm, xmax, ym, ymax, zm, zmax)
-                ]
-
-        self.children = [Node(b, depth=self.depth+1, max_depth = self.max_depth) for b in boxes]
-
-    def get_corners(self):
-        """
-        Get the coordinates of the corners of a node
-        """
-        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
-        return np.array([
-            [xmin, ymin, zmin],
-            [xmax, ymin, zmin],
-            [xmin, ymax, zmin],
-            [xmin, ymin, zmax],
-            [xmax, ymax, zmin],
-            [xmin, ymax, zmax],
-            [xmax, ymin, zmax],
-            [xmax, ymax, zmax]
-            ])
-
-    def get_centre(self):
-        """
-        Get the coordinates of the centre of the cube
-        """
-        xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
-        return np.array([
-            (xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2
-            ])
-
-"""
 GENERAL
 """
 def skew(v):
+    """
+    Skew-symmetrize a vector v
+    """
     if v.ndim > 1:
         v = np.squeeze(v, axis=1)
     return np.array([
@@ -131,27 +22,19 @@ def skew(v):
 
 def homogenize(arr):
     """
-    Converts Euclidean coordinates to homogeneous coordinates
-
-    Args:
-        arr (NDArray, ((1,) or (n, m)): vector or array of m-vectors
-            to homogenize
-    Returns:
-        NDArray ((1,) or (n, m)): homogenized vector or array of 
-            m-vectors
+    Convert a Euclidean vector to homogeneous coordinates
     """
-    if not isinstance(arr, np.ndarray):
-        arr = np.array(arr)
     if len(arr.shape) < 2:
         # one vector
         return np.append(arr, 1)
     else:
+        # many vectors
         ones = np.ones((arr.shape[0],))
         return np.hstack((arr, ones[:, np.newaxis]))
 
 def unhomogenize(vec: npt.NDArray):
     """
-    Unhomogenizes a vector
+    Convert a vector in homogeneous coordinates to Euclidean
     """
     if len(vec.shape) == 1:
         n = vec.shape[0] - 1
@@ -161,6 +44,9 @@ def unhomogenize(vec: npt.NDArray):
         return vec[:, :n] / np.clip(np.expand_dims(vec[:, n], axis=1), 1e-6, None)
 
 def get_vid_frames(vid_path, output_path):
+    """
+    Grab frames from a video
+    """
     cap = cv2.VideoCapture(vid_path)
     frame_ctr = 0
     if not os.path.exists(output_path):
@@ -184,11 +70,19 @@ def get_vid_frames(vid_path, output_path):
 def project_points(P, X):
     """
     Projects a 3d point X to 2d point x using P
+    P is 3x4
+    X is in Euclidean coordinates
+    return value is a 2-vector in Euclidean coordinates
+
+    handles projecting array of vectors
     """
     result = P @ homogenize(X).T
     return unhomogenize(result.T)
 
 def get_fundamental_matrices(views):
+    """
+    Compute the fundamental matrix for the views
+    """
     Fs = dict()
     for i, view_i in enumerate(views):
         Fs[i] = dict()
@@ -208,11 +102,10 @@ def get_fundamental_matrices(views):
             Fs[i][j] /= np.linalg.norm(Fs[i][j])
     return Fs
 
-"""
-VANILLA SFS
-"""
-
 def compute_bounds(views, z_min=0.1, z_max=10.0):
+    """
+    Guess the coordinates for the bounding cube for the object of interest
+    """
     points_3d = []
     for view in views:
         mask = view.get_mask()
@@ -245,6 +138,10 @@ def compute_bounds(views, z_min=0.1, z_max=10.0):
     return min_bound, max_bound
 
 def cubify(min_bound, max_bound):
+    """
+    Convert normal bounds to cube bounds whose centroid
+    matches the centroid of the object of interest
+    """
     ctr = (min_bound + max_bound) / 2
     max_side = np.max(max_bound - min_bound)
     half_side = max_side / 2
@@ -255,11 +152,21 @@ def cubify(min_bound, max_bound):
     return new_min, new_max
 
 def get_distance_map(img):
+    """
+    Create a distance map of the pixels' L2 distance from the nearest 0-pixel
+    """
     img= img.astype(np.uint8)
     dst = cv2.distanceTransform(img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     return dst
 
 def classify_node(node, views):
+    """
+    Determine whether a node is:
+        - "empty", if it is outside the silhouette for at least one view
+        - "full", if it is inside the silhouette for all views
+        - "unknown", if it is inside the silhouette for some views and outside
+            for other views
+    """
     all_inside = True
     for view in views:
         mask = view.get_mask()
@@ -319,6 +226,12 @@ def classify_node(node, views):
         return "unknown"
 
 def carve_voxels(node, views):
+    """
+    Perform voxel carving according to:
+        - remove if a node is empty
+        - retain if a node is full
+        - subdivide if a node is unknown
+    """
     state = classify_node(node, views)
 
     if state == "empty":
@@ -337,10 +250,6 @@ def carve_voxels(node, views):
 
     for child in node.children:
         carve_voxels(child, views)
-
-"""
-HALF-SPACE SFS
-"""
 
 def get_point_status(Xs, views, eps_init=2.0):
     eps = eps_init * len(views) / 10
@@ -393,35 +302,6 @@ def interpolate(X, direction, views, status, n_iters=5):
             low = mid
             X_ref = X_test
     return X_ref
-
-def extract_contours(mask):
-    """
-    Get contours from the binary masks
-    """
-    mask = mask.astype(np.uint8)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    return contours[0].squeeze()
-
-
-def get_tangent_lines(contours):
-    tangents = []
-    for i in range(contours.shape[0]):
-        x, y = contours[i]
-        pt_prev = contours[(i-1) % len(contours)]
-        pt_next = contours[(i+1) % len(contours)]
-
-        t_i = pt_next - pt_prev # difference between points, centered diff derivative
-        t_i_norm = np.linalg.norm(t_i) # normalize to get direction
-        dx, dy = t_i / t_i_norm
-
-        a, b = -dy, dx
-        #a, b = dx, dy
-        c = -a * x - b * y
-
-        ell = np.array([a, b, c], dtype=np.float32)
-
-        tangents.append(ell)
-    return np.array(tangents)
 
 def get_epipolar_line(F, pt):
     """
