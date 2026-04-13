@@ -1,5 +1,3 @@
-from typing import List
-
 import numpy as np
 from numpy import typing as npt
 import cv2
@@ -251,58 +249,6 @@ def carve_voxels(node, views):
     for child in node.children:
         carve_voxels(child, views)
 
-def get_point_status(Xs, views, eps_init=2.0):
-    eps = eps_init * len(views) / 10
-    n_pts = Xs.shape[0]
-    status = np.full(n_pts, 2, dtype=int)
-
-    for view in views:
-        P = view.get_proj()
-        dst_map = view.dst_bg
-        mask = view.mask
-        h, w = dst_map.shape
-
-        X_proj = project_points(P, Xs)
-        u, v = X_proj[:, 0], X_proj[:, 1]
-
-        # check out of bounds
-        in_img = (u >= 0) & (u < w) & (v >= 0) & (v < h)
-        status[~in_img] = 0
-        
-        # check remaining points
-        idx = np.where(status > 0)[0]
-        u_int = np.floor(u[idx]).astype(np.int32)
-        v_int = np.floor(v[idx]).astype(np.int32)
-        
-        m_vals = mask[v_int, u_int]
-        d_vals = dst_map[v_int, u_int]
-
-        # completely outside for one view
-        is_outside = (m_vals == 0)
-        status[idx[is_outside]] = 0
-
-        # Mark points near the boundary as "pending" (1) if they weren't already marked outside (0)
-        is_pending = (m_vals > 0) & (d_vals <= eps)
-        # Only update if it wasn't already set to 0
-        pending_indices = idx[is_pending]
-        status[pending_indices] = np.minimum(status[pending_indices], 1)
-
-    return status
-
-def interpolate(X, direction, views, status, n_iters=5):
-    low, high = 0.0, 1.0
-    X_ref = X
-    for _ in range(n_iters):
-        mid = (low + high) / 2
-        X_test = X + direction * mid
-        test_status = get_point_status(X_test[np.newaxis], views)[0]
-        if test_status == 0:
-            high = mid
-        else:
-            low = mid
-            X_ref = X_test
-    return X_ref
-
 def get_epipolar_line(F, pt):
     """
     Compute the epipolar line at a point
@@ -370,103 +316,14 @@ def compute_weighted_tangent(contributions, ray_curr, cam_centre_curr):
 
     return cam_centre_curr + t * ray_curr
 
-def reconstruct(views, Fs):
-    surface_points = []
-    for i in range(len(views)): # pylint: disable=consider-using-enumerate
-        view_curr = views[i]
-        view_prev = views[(i-1) % len(views)]
-        view_next = views[(i+1) % len(views)]
-
-        P_curr = view_curr.P
-        P_prev = view_prev.P
-        P_next = view_next.P
-
-        contour_curr = view_curr.contours
-        contour_prev = view_prev.contours
-        contour_next = view_next.contours
-
-        tangents_curr = view_curr.tangents
-        tangents_prev = view_prev.tangents
-        tangents_next = view_next.tangents
-
-        cam_centre_curr = view_curr.cam_centre
-        cam_centre_prev = view_prev.cam_centre
-        cam_centre_next = view_next.cam_centre
-
-        valid_pts = []
-        for j in range(contour_curr.shape[0]):
-            pt_prev, idx_prev = symmetric_match(
-                    Fs[i][(i-1) % len(views)],
-                    Fs[(i-1) % len(views)][i],
-                    contour_curr[j],
-                    contour_prev,
-                    contour_curr)
-            pt_next, idx_next = symmetric_match(
-                    Fs[i][(i+1) % len(views)],
-                    Fs[(i+1) % len(views)][i],
-                    contour_curr[j],
-                    contour_next,
-                    contour_curr)
-
-            if pt_prev is None or pt_next is None or idx_prev is None or idx_next is None:
-                # null
-                continue
-
-            # current view
-            ray_curr = get_visual_ray(P_curr, contour_curr[j], cam_centre_curr)
-            planes_curr = backproject_tangent_plane(
-                P_curr, tangents_curr, contour_curr, j
-            )
-            contributions_curr = [(p, ray_curr, cam_centre_curr) for p in planes_curr]
-        
-            # prev view
-            ray_prev = get_visual_ray(P_prev, contour_prev[idx_prev], cam_centre_prev)
-            planes_prev = backproject_tangent_plane(
-                P_prev, tangents_prev, contour_prev, idx_prev
-            )
-            contributions_prev = [(p, ray_prev, cam_centre_prev) for p in planes_prev]
-        
-            # next view
-            ray_next = get_visual_ray(P_next, contour_next[idx_next], cam_centre_next)
-            planes_next = backproject_tangent_plane(
-                P_next, tangents_next, contour_next, idx_next
-            )
-            contributions_next = [(p, ray_next, cam_centre_next) for p in planes_next]
-        
-            all_contributions = contributions_curr + contributions_prev + contributions_next
-            pt =compute_weighted_tangent(all_contributions, ray_curr, cam_centre_curr)
-            if pt is None:
-                continue
-            valid_pts.append(pt)
-
-        valid_pts = np.array(valid_pts)
-        statuses = get_point_status(valid_pts, views)
-
-        mask_curr = view_curr.mask
-        h, w = mask_curr.shape
-        for pt in valid_pts:
-            is_valid = True
-            for view in views:
-                mask = view.mask
-                h, w = mask.shape
-                pt_proj = project_points(view.P, pt)
-                u, v = pt_proj
-                if u < 0 or u >= w or v < 0 or v >= h:
-                    is_valid = False
-                    break
-
-                if mask[int(v), int(u)] == 0:
-                    is_valid = False
-                    break
-            if is_valid:
-                surface_points.append(pt)
-    return np.array(surface_points)
-            
 """
 I/O
 """
 
-def export_to_ply(node, filename):
+def octree_to_ply(node, filename):
+    """
+    Export node centres as point cloud points to ply file
+    """
     points = []
     def collect_points(node):
         if not node.children:
@@ -498,122 +355,19 @@ end_header
             print(e)
     print(f"Saved {len(points)} voxels to {filename}")
 
+def pts_to_ply(points, ply_path):
+    N = len(points)
 
-"""
-TESTING
-"""
+    with open(f"{ply_path}.ply", 'w') as f:
+        # Header
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {N}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("end_header\n")
 
-def to_gray(img):
-    if img.shape[2] == 4:
-        bgr = img[:, :, :3]
-        alpha = img[:, :, 3:] / 255.0
-        background = np.ones_like(bgr, dtype=np.uint8) * 255
-        img = (bgr * alpha + background * (1 - alpha)).astype(np.uint8)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-def show_image(name, img):
-    if img.shape[2] == 4:
-        # split into BGR and alpha
-        bgr = img[:, :, :3]
-        alpha = img[:, :, 3:] / 255.0
-        # composite against white background
-        background = np.ones_like(bgr, dtype=np.uint8) * 255
-        img = (bgr * alpha + background * (1 - alpha)).astype(np.uint8)
-    cv2.imshow(name, img)
-
-def get_display_image(view):
-    img = view.img
-    if img.ndim == 3 and img.shape[2] == 4:
-        bgr = img[:, :, :3]
-        alpha = img[:, :, 3:] / 255.0
-        background = np.ones_like(bgr, dtype=np.uint8) * 255
-        return (bgr * alpha + background * (1 - alpha)).astype(np.uint8)
-    return img.astype(np.uint8)
-
-def test_unhomogenize():
-    arr1 = np.array([-3, -2, -1, 1])
-    arr2 = np.array([-3, 2, 1])
-    arr3 = np.array([
-        [-3, -2, -1, 1],
-        [-4, 5, 6, 1]
-    ])
-
-    print("arr1: ", arr1)
-    print("arr1 unhomo: ", unhomogenize(arr1))
-
-    print("arr2: ", arr2)
-    print("arr2 unhomo: ", unhomogenize(arr2))
-
-    print("arr3: ", arr3)
-    print("arr3 unhomo: ", unhomogenize(arr3))
-
-def verify_fundamental_matrices(Fs, views):
-    for i in range(len(views)):
-        for j in range(len(views)):
-            if i == j:
-                continue
-            F = Fs[i][j]
-            contour_i = views[i].contours
-            contour_j = views[j].contours
-            
-            for k in range(0, len(contour_i), len(contour_i) // 10):
-                pt_i = homogenize(contour_i[k, :2])
-                line = F @ pt_i
-                pt_j, _ = find_epipolar_match(line, contour_j)
-                pt_j_h = homogenize(pt_j[:2])
-                residual = pt_j_h @ F @ pt_i
-                print(f"F[{i}][{j}] residual at point {k}: {residual:.6f}")
-
-def visualize_matches(views, Fs, i, j, step=20):
-    img_i = get_display_image(views[i])
-    img_j = get_display_image(views[j])
-    contour_i = views[i].contours
-    contour_j = views[j].contours
-    w = img_i.shape[1]
-
-    combined = np.hstack([img_i, img_j])
-
-    n_matches = 0
-    for k in range(0, len(contour_i), step):
-        pt, idx = symmetric_match(
-            Fs[i][j], Fs[j][i],
-            contour_i[k], contour_j, contour_i
-        )
-        if pt is None:
-            continue
-        dy = abs(int(contour_i[k, 1]) - int(pt[1]))
-        print(f"dy = {dy}")
-        n_matches += 1
-
-        color = tuple(np.random.randint(0, 255, 3).tolist())
-        pt_i = tuple(contour_i[k, :2].astype(int))
-        pt_j = tuple((pt[:2] + np.array([w, 0])).astype(int))
-
-        cv2.circle(combined, pt_i, 4, color, -1)
-        cv2.circle(combined, pt_j, 4, color, -1)
-        cv2.line(combined, pt_i, pt_j, color, 1)
-
-    print(f"Found {n_matches} matches")
-    cv2.imshow(f"matches {i} -> {j}", combined)
-    cv2.waitKey(0)
-
-def visualize_planes(views, Fs, i):
-    for k in range(0, len(views[0].contours), 20):
-        pt_prev, idx_prev = symmetric_match(
-            Fs[0][len(views)-1], Fs[len(views)-1][0],
-            views[0].contours[k], views[len(views)-1].contours, views[0].contours
-        )
-        pt_next, idx_next = symmetric_match(
-            Fs[0][1], Fs[1][0],
-            views[0].contours[k], views[1].contours, views[0].contours
-        )
-        if pt_prev is None or pt_next is None or idx_prev is None or idx_next is None:
-            continue
-        planes_prev = backproject_tangent_plane(
-            views[len(views)-1].P,
-            views[len(views)-1].tangents,
-            views[len(views)-1].contours, idx_prev)
-        planes_next = backproject_tangent_plane(views[1].P, views[1].tangents, views[1].contours, idx_next)
-        print(f"Point {k}:")
-        print(f"  prev normal: {planes_prev[2][:3] / np.linalg.norm(planes_prev[2][:3])}")
-        print(f"  next normal: {planes_next[2][:3] / np.linalg.norm(planes_next[2][:3])}")
+        # Points
+        for p in points:
+            f.write(f"{p[0]} {p[1]} {p[2]}\n")

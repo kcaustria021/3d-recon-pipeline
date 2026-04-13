@@ -6,7 +6,7 @@ import cv2
 from scipy.interpolate import splprep, splev
 from numpy import typing as npt
 
-from utils_sfs import get_distance_map, symmetric_match, project_points
+from vol_sfs import get_distance_map, symmetric_match, project_points
 
 class View2:
     def __init__(self, img_path:str, mask_path:str, proj_props:npt.NDArray):

@@ -7,7 +7,7 @@ import os
 # class imports
 
 # function imports
-from utils_sfs import *
+from vol_sfs import *
 import dual_space_sfs
 
 def get_args():
@@ -58,11 +58,14 @@ def main():
     single_view = args.s
     sfs_method = args.method
 
-    # assert output_file.endswith(".ply"), "Output file must be a .ply file"
-    # imgs = sorted(glob.glob(os.path.join(imgs_path, "*.png")))
-    # masks = sorted(glob.glob(os.path.join(masks_path, "*.png")))
-    imgs = sorted(glob.glob(os.path.join(imgs_path, "*.ppm")))
-    masks = sorted(glob.glob(os.path.join(masks_path, "*.pgm")))
+    if imgs_path == "media/bunny_data/images":
+        # bunny data has different file extensions
+        imgs = sorted(glob.glob(os.path.join(imgs_path, "*.ppm")))
+        masks = sorted(glob.glob(os.path.join(masks_path, "*.pgm")))
+    else:
+        # synthetic data is normal
+        imgs = sorted(glob.glob(os.path.join(imgs_path, "*.png")))
+        masks = sorted(glob.glob(os.path.join(masks_path, "*.png")))
 
     assert len(imgs) == len(masks), "Number of images must match number of masks"
     n_views = len(imgs)
@@ -95,15 +98,14 @@ def main():
         print("Carving voxels...")
         carve_voxels(octree_root, views)
 
-        export_to_ply(octree_root, output_file)
+        octree_to_ply(octree_root, output_file)
     elif sfs_method == "halfspace":
         # dual space
-        view_trial = views[0]
         Fs = get_fundamental_matrices(views)
         print("Recovering surface points...")
         surface_pts = dual_space_sfs.reconstruct2(views, Fs)
         
-        np.save(output_file, surface_pts)
+        pts_to_ply(surface_pts, output_file)
         print(f"Saved {surface_pts.shape[0]} points to {output_file}")
 
 if __name__ == "__main__":
